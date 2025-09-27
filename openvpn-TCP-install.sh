@@ -176,9 +176,15 @@ if [[ ! -e /etc/openvpn/server/server.conf ]]; then
 	echo "   6) AdGuard"
 	echo "   7) Specify custom resolvers"
 	read -p "DNS server [3]: " dns
+	if [[ -z "$dns" ]]; then
+        dns=3
+    fi
 	until [[ -z "$dns" || "$dns" =~ ^[1-7]$ ]]; do
 		echo "$dns: invalid selection."
 		read -p "DNS server [3]: " dns
+		if [[ -z "$dns" ]]; then
+        dns=3
+    fi
 	done
 	# If the user selected custom resolvers, we deal with that here
 	if [[ "$dns" = "7" ]]; then

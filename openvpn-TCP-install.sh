@@ -175,10 +175,10 @@ if [[ ! -e /etc/openvpn/server/server.conf ]]; then
 	echo "   5) Quad9"
 	echo "   6) AdGuard"
 	echo "   7) Specify custom resolvers"
-	read -p "DNS server [1]: " dns
+	read -p "DNS server [3]: " dns
 	until [[ -z "$dns" || "$dns" =~ ^[1-7]$ ]]; do
 		echo "$dns: invalid selection."
-		read -p "DNS server [1]: " dns
+		read -p "DNS server [3]: " dns
 	done
 	# If the user selected custom resolvers, we deal with that here
 	if [[ "$dns" = "7" ]]; then
@@ -346,7 +346,7 @@ persist-key
 persist-tun
 verb 3
 crl-verify crl.pem" >> /etc/openvpn/server/server.conf
-	if [[ "$protocol" = "udp" ]]; then
+	if [[ "$protocol" = "tcp" ]]; then
 		echo "explicit-exit-notify" >> /etc/openvpn/server/server.conf
 	fi
 	# Enable net.ipv4.ip_forward for the system

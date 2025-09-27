@@ -5,7 +5,8 @@ openvpn-安装
 
 
 一键安装命令
-
+```plain text
 TCP协议：wget https://raw.githubusercontent.com/antapp-cc/openvpn/refs/heads/main/openvpn-TCP-install.sh -O openvpn-install.sh && bash openvpn-install.sh
 
 UDP协议：wget https://raw.githubusercontent.com/antapp-cc/openvpn/refs/heads/main/openvpn-UDP-install.sh -O openvpn-install.sh && bash openvpn-install.sh
+```

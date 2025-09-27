@@ -1,7 +1,7 @@
 #!/bin/bash
 #
 # https://github.com/Nyr/openvpn-install
-# https://github.com/antapp-cc/openvpn-install
+# https://github.com/antapp-cc/openvpn.git
 #
 # Copyright (c) 2013 Nyr. Released
 # Copyright (c) 2025 antapp-cc. Released

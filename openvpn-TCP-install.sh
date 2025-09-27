@@ -346,7 +346,7 @@ persist-key
 persist-tun
 verb 3
 crl-verify crl.pem" >> /etc/openvpn/server/server.conf
-	if [[ "$protocol" = "tcp" ]]; then
+	if [[ "$protocol" = "udp" ]]; then
 		echo "explicit-exit-notify" >> /etc/openvpn/server/server.conf
 	fi
 	# Enable net.ipv4.ip_forward for the system

@@ -6,7 +6,6 @@
 # Copyright (c) 2013 Nyr. Released
 # Copyright (c) 2025 antapp-cc. Released
 
-
 # Detect Debian users running the script with "sh" instead of bash
 if readlink /proc/$$/exe | grep -q "dash"; then
 	echo 'This installer needs to be run with "bash", not "sh".'
@@ -111,7 +110,7 @@ if [[ ! -e /etc/openvpn/server/server.conf ]]; then
 		[[ -z "$ip_number" ]] && ip_number="1"
 		ip=$(ip -4 addr | grep inet | grep -vE '127(\.[0-9]{1,3}){3}' | cut -d '/' -f 1 | grep -oE '[0-9]{1,3}(\.[0-9]{1,3}){3}' | sed -n "$ip_number"p)
 	fi
-	# If $ip is a private IP address, the server must be behind NAT
+	# If $ip is a private IP address, the server must be behind NAT
 	if echo "$ip" | grep -qE '^(10\.|172\.1[6789]\.|172\.2[0-9]\.|172\.3[01]\.|192\.168)'; then
 		echo
 		echo "This server is behind NAT. What is the public IPv4 address or hostname?"
@@ -141,13 +140,13 @@ if [[ ! -e /etc/openvpn/server/server.conf ]]; then
 			read -p "IPv6 address [1]: " ip6_number
 		done
 		[[ -z "$ip6_number" ]] && ip6_number="1"
-		ip6=$(ip -6 addr | grep 'inet6 [23]' | cut -d '/' -f 1 | grep -oE '([0-9a-fA-F]{0,4}:){1,7}[0-9a-fA-F]{0,4}' | sed -n "$ip6_number"p)
+		ip6=$(ip -6 addr | grep 'inet6 [23' | cut -d '/' -f 1 | grep -oE '([0-9a-fA-F]{0,4}:){1,7}[0-9a-fA-F]{0,4}' | sed -n "$ip6_number"p)
 	fi
 	echo
 	echo "Which protocol should OpenVPN use?"
 	echo "   1) UDP"
 	echo "   2) TCP (recommended)"
-	read -p "Protocol [2]: " protocol
+	protocol="2"
 	until [[ -z "$protocol" || "$protocol" =~ ^[12]$ ]]; do
 		echo "$protocol: invalid selection."
 		read -p "Protocol [2]: " protocol
@@ -175,21 +174,16 @@ if [[ ! -e /etc/openvpn/server/server.conf ]]; then
 	echo "   3) 1.1.1.1"
 	echo "   4) OpenDNS"
 	echo "   5) Quad9"
-	echo "   6) AdGuard"
-	echo "   7) Specify custom resolvers"
-	read -p "DNS server [3]: " dns
-	if [[ -z "$dns" ]]; then
-        dns=3
-    fi
-	until [[ -z "$dns" || "$dns" =~ ^[1-7]$ ]]; do
+	echo "   6) Gcore"
+	echo "   7) AdGuard"
+	echo "   8) Specify custom resolvers"
+	dns="3"
+	until [[ -z "$dns" || "$dns" =~ ^[1-8]$ ]]; do
 		echo "$dns: invalid selection."
 		read -p "DNS server [3]: " dns
-		if [[ -z "$dns" ]]; then
-        dns=3
-    fi
 	done
 	# If the user selected custom resolvers, we deal with that here
-	if [[ "$dns" = "7" ]]; then
+	if [[ "$dns" = "8" ]]; then
 		echo
 		until [[ -n "$custom_dns" ]]; do
 			echo "Enter DNS servers (one or more IPv4 addresses, separated by commas or spaces):"
@@ -337,10 +331,14 @@ server 10.8.0.0 255.255.255.0" > /etc/openvpn/server/server.conf
 			echo 'push "dhcp-option DNS 149.112.112.112"' >> /etc/openvpn/server/server.conf
 		;;
 		6)
+			echo 'push "dhcp-option DNS 95.85.95.85"' >> /etc/openvpn/server/server.conf
+			echo 'push "dhcp-option DNS 2.56.220.2"' >> /etc/openvpn/server/server.conf
+		;;
+		7)
 			echo 'push "dhcp-option DNS 94.140.14.14"' >> /etc/openvpn/server/server.conf
 			echo 'push "dhcp-option DNS 94.140.15.15"' >> /etc/openvpn/server/server.conf
 		;;
-		7)
+		8)
 		for dns_ip in $custom_dns; do
 			echo "push \"dhcp-option DNS $dns_ip\"" >> /etc/openvpn/server/server.conf
 		done
@@ -380,7 +378,7 @@ crl-verify crl.pem" >> /etc/openvpn/server/server.conf
 		firewall-cmd --direct --add-rule ipv4 nat POSTROUTING 0 -s 10.8.0.0/24 ! -d 10.8.0.0/24 -j SNAT --to "$ip"
 		firewall-cmd --permanent --direct --add-rule ipv4 nat POSTROUTING 0 -s 10.8.0.0/24 ! -d 10.8.0.0/24 -j SNAT --to "$ip"
 		if [[ -n "$ip6" ]]; then
-			firewall-cmd --zone=trusted --add-source=fddd:1194:1194:1194::/64
+			firewall-ccmd --zone=trusted --add-source=fddd:1194:1194:1194::/64
 			firewall-cmd --permanent --zone=trusted --add-source=fddd:1194:1194:1194::/64
 			firewall-cmd --direct --add-rule ipv6 nat POSTROUTING 0 -s fddd:1194:1194:1194::/64 ! -d fddd:1194:1194:1194::/64 -j SNAT --to "$ip6"
 			firewall-cmd --permanent --direct --add-rule ipv6 nat POSTROUTING 0 -s fddd:1194:1194:1194::/64 ! -d fddd:1194:1194:1194::/64 -j SNAT --to "$ip6"
@@ -546,9 +544,9 @@ else
 					firewall-cmd --permanent --remove-port="$port"/"$protocol"
 					firewall-cmd --permanent --zone=trusted --remove-source=10.8.0.0/24
 					firewall-cmd --direct --remove-rule ipv4 nat POSTROUTING 0 -s 10.8.0.0/24 ! -d 10.8.0.0/24 -j SNAT --to "$ip"
-					firewall-cmd --permanent --direct --remove-rule ipv4 nat POSTROUTING 0 -s 10.8.0.0/24 ! -d 10.8.0.0/24 -j SNAT --to "$ip"
+					firewall-ccmd --permanent --direct --remove-rule ipv4 nat POSTROUTING 0 -s 10.8.0.0/24 ! -d 10.8.0.0/24 -j SNAT --to "$ip"
 					if grep -qs "server-ipv6" /etc/openvpn/server/server.conf; then
-						ip6=$(firewall-cmd --direct --get-rules ipv6 nat POSTROUTING | grep '\-s fddd:1194:1194:1194::/64 '"'"'!'"'"' -d fddd:1194:1194:1194::/64' | grep -oE '[^ ]+$')
+						ip6=$(firewall-cmd --direct --get-rules ipv6 nat POSTROUTING | grep '\-s fddd:1194:1194:1194::/64 '"'"'!'"'"' -d fddd:1194:1194:1194::/64' | grep -oE '[0-9]+$')
 						firewall-cmd --zone=trusted --remove-source=fddd:1194:1194:1194::/64
 						firewall-cmd --permanent --zone=trusted --remove-source=fddd:1194:1194:1194::/64
 						firewall-cmd --direct --remove-rule ipv6 nat POSTROUTING 0 -s fddd:1194:1194:1194::/64 ! -d fddd:1194:1194:1194::/64 -j SNAT --to "$ip6"

@@ -10,11 +10,11 @@ openvpn-安装
 
 安装命令
 
-TCP协议：
+默认TCP协议：
 ```plain text
 wget https://is.gd/openvpnTCP -O openvpn-install.sh && bash openvpn-install.sh
 ```
-UDP协议：
+默认UDP协议：
 ```plain text
 wget https://is.gd/openvpnUDP -O openvpn-install.sh && bash openvpn-install.sh
 ```

@@ -1,8 +1,3 @@
-# 删除原有文件
-rm -f /root/update-sources.sh
-
-# 重新创建脚本
-cat > /root/update-sources.sh << 'EOF'
 #!/bin/bash
 # Debian 11 sources.list自动替换脚本
 # 适用于系统安装完成后自动运行
@@ -46,7 +41,3 @@ else
     fi
     exit 1
 fi
-EOF
-
-# 设置执行权限
-chmod +x /root/update-sources.sh

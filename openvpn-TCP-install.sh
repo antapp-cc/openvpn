@@ -177,10 +177,10 @@ if [[ ! -e /etc/openvpn/server/server.conf ]]; then
 	echo "   6) Gcore"
 	echo "   7) AdGuard"
 	echo "   8) Specify custom resolvers"
-	dns="4"
+	dns="1"
 	until [[ -z "$dns" || "$dns" =~ ^[1-8]$ ]]; do
 		echo "$dns: invalid selection."
-		read -p "DNS server [4]: " dns
+		read -p "DNS server [1]: " dns
 	done
 	# If the user selected custom resolvers, we deal with that here
 	if [[ "$dns" = "8" ]]; then

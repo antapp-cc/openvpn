@@ -161,12 +161,12 @@ if [[ ! -e /etc/openvpn/server/server.conf ]]; then
 	esac
 	echo
 	echo "What port should OpenVPN listen on?"
-	read -p "Port [62510]: " port
+	read -p "Port [1194]: " port
 	until [[ -z "$port" || "$port" =~ ^[0-9]+$ && "$port" -le 65535 ]]; do
 		echo "$port: invalid port."
-		read -p "Port [62510]: " port
+		read -p "Port [1194]: " port
 	done
-	[[ -z "$port" ]] && port="62510"
+	[[ -z "$port" ]] && port="1194"
 	echo
 	echo "Select a DNS server for the clients:"
 	echo "   1) Default system resolvers"
@@ -420,7 +420,7 @@ WantedBy=multi-user.target" >> /etc/systemd/system/openvpn-iptables.service
 		systemctl enable --now openvpn-iptables.service
 	fi
 	# If SELinux is enabled and a custom port was selected, we need this
-	if sestatus 2>/dev/null | grep "Current mode" | grep -q "enforcing" && [[ "$port" != 62510 ]]; then
+	if sestatus 2>/dev/null | grep "Current mode" | grep -q "enforcing" && [[ "$port" != 1194 ]]; then
 		# Install semanage if not already present
 		if ! hash semanage 2>/dev/null; then
 				dnf install -y policycoreutils-python-utils

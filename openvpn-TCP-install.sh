@@ -1,7 +1,7 @@
 #!/bin/bash
 #
-# OpenVPN-install - Smart Proxy Edition
-# 修正版：国内IP使用 net_gateway 走本地网络
+# OpenVPN-install - Smart Proxy Edition (修正版)
+# 修正：客户端模板已添加 VPN 服务器 IP 路由
 
 # Detect Debian users running the script with "sh" instead of bash
 if readlink /proc/$$/exe | grep -q "dash"; then
@@ -9,7 +9,7 @@ if readlink /proc/$$/exe | grep -q "dash"; then
 	exit
 fi
 
-# Discard stdin. Needed when running from a one-liner which includes a newline
+# Discard stdin
 read -N 999999 -t 0.001
 
 # Detect OS
@@ -59,6 +59,7 @@ if [[ ! -e /dev/net/tun ]] || ! ( exec 7<>/dev/net/tun ) 2>/dev/null; then
 	exit
 fi
 
+# Store variables that need to be accessible in the client configuration phase
 script_dir="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 
 if [[ ! -e /etc/openvpn/server/server.conf ]]; then
@@ -90,6 +91,7 @@ if [[ ! -e /etc/openvpn/server/server.conf ]]; then
 	fi
 	
 	# If $ip is a private IP, ask for public IP
+	public_ip=""
 	if echo "$ip" | grep -qE '^(10\.|172\.1[6789]\.|172\.2[0-9]\.|172\.3[01]\.|192\.168)'; then
 		echo
 		echo "This server is behind NAT. What is the public IPv4 address or hostname?"
@@ -101,6 +103,10 @@ if [[ ! -e /etc/openvpn/server/server.conf ]]; then
 		done
 		[[ -z "$public_ip" ]] && public_ip="$get_public_ip"
 	fi
+	
+	# Use the appropriate IP for client configuration
+	client_ip="$ip"
+	[[ -n "$public_ip" ]] && client_ip="$public_ip"
 	
 	# Select Protocol
 	echo
@@ -127,7 +133,7 @@ if [[ ! -e /etc/openvpn/server/server.conf ]]; then
 	done
 	[[ -z "$port" ]] && port="62231"
 	
-	# ========== 新增：选择代理模式 ==========
+	# Select Proxy Mode
 	echo
 	echo "Select proxy mode:"
 	echo "   1) Global proxy (all traffic through VPN)"
@@ -138,7 +144,6 @@ if [[ ! -e /etc/openvpn/server/server.conf ]]; then
 		read -p "Proxy mode [2]: " proxy_mode
 	done
 	[[ -z "$proxy_mode" ]] && proxy_mode="2"
-	# ==========================================
 	
 	# Select DNS
 	echo
@@ -157,6 +162,7 @@ if [[ ! -e /etc/openvpn/server/server.conf ]]; then
 		read -p "DNS server [3]: " dns
 	done
 	
+	custom_dns=""
 	if [[ "$dns" = "8" ]]; then
 		echo
 		until [[ -n "$custom_dns" ]]; do
@@ -262,24 +268,19 @@ tls-crypt tc.key
 topology subnet
 server 10.8.0.0 255.255.255.0" > /etc/openvpn/server/server.conf
 
-	# ========== 代理模式配置 ==========
+	# Proxy mode configuration
 	if [[ "$proxy_mode" == "2" ]]; then
-		# 智能代理模式：所有流量先走VPN，国内IP段走本地
+		# Smart proxy mode
 		echo 'push "redirect-gateway def1 bypass-dhcp"' >> /etc/openvpn/server/server.conf
 		
-		# 国内主要IP段 - 使用 net_gateway 走本地网络
-		# 保留地址
+		# China routes - using net_gateway to bypass VPN
 		echo 'push "route 10.0.0.0 255.0.0.0 net_gateway"' >> /etc/openvpn/server/server.conf
 		echo 'push "route 127.0.0.0 255.0.0.0 net_gateway"' >> /etc/openvpn/server/server.conf
 		echo 'push "route 172.16.0.0 255.240.0.0 net_gateway"' >> /etc/openvpn/server/server.conf
 		echo 'push "route 192.168.0.0 255.255.0.0 net_gateway"' >> /etc/openvpn/server/server.conf
-		
-		# 基础运营商
 		echo 'push "route 27.0.0.0 255.248.0.0 net_gateway"' >> /etc/openvpn/server/server.conf
 		echo 'push "route 58.0.0.0 255.248.0.0 net_gateway"' >> /etc/openvpn/server/server.conf
 		echo 'push "route 60.0.0.0 255.248.0.0 net_gateway"' >> /etc/openvpn/server/server.conf
-		
-		# 电信/联通/移动/铁通
 		echo 'push "route 101.0.0.0 255.224.0.0 net_gateway"' >> /etc/openvpn/server/server.conf
 		echo 'push "route 103.0.0.0 255.248.0.0 net_gateway"' >> /etc/openvpn/server/server.conf
 		echo 'push "route 106.0.0.0 255.248.0.0 net_gateway"' >> /etc/openvpn/server/server.conf
@@ -310,10 +311,9 @@ server 10.8.0.0 255.255.255.0" > /etc/openvpn/server/server.conf
 		echo 'push "route 222.0.0.0 255.248.0.0 net_gateway"' >> /etc/openvpn/server/server.conf
 		echo 'push "route 223.0.0.0 255.224.0.0 net_gateway"' >> /etc/openvpn/server/server.conf
 	else
-		# 全局代理模式
+		# Global proxy mode
 		echo 'push "redirect-gateway def1 bypass-dhcp"' >> /etc/openvpn/server/server.conf
 	fi
-	# ================================
 
 	echo 'ifconfig-pool-persist ipp.txt' >> /etc/openvpn/server/server.conf
 	
@@ -409,13 +409,16 @@ WantedBy=multi-user.target" > /etc/systemd/system/openvpn-iptables.service
 	# Use public IP if behind NAT
 	[[ -n "$public_ip" ]] && ip="$public_ip"
 	
-	# Create client-common.txt
+	# =========================================
+	# Create client-common.txt - 修正版
+	# =========================================
 	if [[ "$proxy_mode" == "2" ]]; then
-		# 智能代理模式：客户端模板
-		echo "client
+		# Smart proxy mode: 需要添加VPN服务器IP路由
+		cat > /etc/openvpn/server/client-common.txt << CLIENTCONF
+client
 dev tun
 proto $protocol
-remote $ip $port
+remote $client_ip $port
 resolv-retry infinite
 nobind
 persist-key
@@ -423,12 +426,18 @@ persist-tun
 remote-cert-tls server
 auth SHA512
 ignore-unknown-option block-outside-dns
-verb 3" > /etc/openvpn/server/client-common.txt
+verb 3
+
+# Smart proxy: VPN server IP must go through VPN tunnel
+route $client_ip 255.255.255.255 vpn_gateway
+CLIENTCONF
 	else
-		echo "client
+		# Global proxy mode
+		cat > /etc/openvpn/server/client-common.txt << CLIENTCONF
+client
 dev tun
 proto $protocol
-remote $ip $port
+remote $client_ip $port
 resolv-retry infinite
 nobind
 persist-key
@@ -436,8 +445,10 @@ persist-tun
 remote-cert-tls server
 auth SHA512
 ignore-unknown-option block-outside-dns
-verb 3" > /etc/openvpn/server/client-common.txt
+verb 3
+CLIENTCONF
 	fi
+	# =========================================
 	
 	# Enable and start OpenVPN
 	systemctl enable --now openvpn-server@server.service

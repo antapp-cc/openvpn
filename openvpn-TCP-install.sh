@@ -4,7 +4,7 @@
 # https://github.com/antapp-cc/openvpn.git
 #
 # Copyright (c) 2013 Nyr. Released
-# Copyright (c) 2026 antapp-cc. Released
+# Copyright (c) 2025 antapp-cc. Released
 
 # Detect Debian users running the script with "sh" instead of bash
 if readlink /proc/$$/exe | grep -q "dash"; then
@@ -271,10 +271,10 @@ if [[ ! -e /etc/openvpn/server/server.conf ]]; then
 	
 	echo
 	echo "Select a routing mode for the clients:"
-	echo "   1) Global proxy (all traffic through VPN)"
-	echo "   2) Split tunnel (only specific routes through VPN)"
-	echo "   3) China bypass (all traffic through VPN, except China IPs go direct)"
-	routing="3"
+	echo "   1) Global proxy (全局代理，所有流量走VPN)"
+	echo "   2) Split tunnel (手动分流，仅指定网段走VPN)"
+	echo "   3) China bypass (国内外分流，国外走VPN，国内走本地网络)"
+	read -p "Routing mode [3]: " routing
 	until [[ -z "$routing" || "$routing" =~ ^[1-3]$ ]]; do
 		echo "$routing: invalid selection."
 		read -p "Routing mode [3]: " routing

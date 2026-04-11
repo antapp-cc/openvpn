@@ -168,6 +168,17 @@ if [[ ! -e /etc/openvpn/server/server.conf ]]; then
 	done
 	[[ -z "$port" ]] && port="62231"
 	echo
+	# 选择代理模式
+	echo "Select proxy mode:"
+	echo "   1) Global proxy (all traffic through VPN)"
+	echo "   2) Smart proxy (Domestic direct, Overseas via VPN)"
+	proxy_mode="2"
+	until [[ -z "$proxy_mode" || "$proxy_mode" =~ ^[12]$ ]]; do
+		echo "$proxy_mode: invalid selection."
+		read -p "Proxy mode [2]: " proxy_mode
+	done
+	[[ -z "$proxy_mode" ]] && proxy_mode="2"
+	echo
 	echo "Select a DNS server for the clients:"
 	echo "   1) Default system resolvers"
 	echo "   2) Google"
@@ -291,13 +302,94 @@ auth SHA512
 tls-crypt tc.key
 topology subnet
 server 10.8.0.0 255.255.255.0" > /etc/openvpn/server/server.conf
-	# IPv6
-	if [[ -z "$ip6" ]]; then
+
+	# ========== 智能路由配置（新增） ==========
+	if [[ "$proxy_mode" == "2" ]]; then
+		# 智能代理模式：推送 redirect-gateway + 国内路由表
 		echo 'push "redirect-gateway def1 bypass-dhcp"' >> /etc/openvpn/server/server.conf
+		
+		# 国内主要IP段路由（让这些IP直接访问，不走VPN）
+		# 保留地址
+		echo 'push "route 10.0.0.0 255.0.0.0 vpn_gateway"' >> /etc/openvpn/server/server.conf
+		echo 'push "route 127.0.0.0 255.0.0.0 vpn_gateway"' >> /etc/openvpn/server/server.conf
+		echo 'push "route 172.16.0.0 255.240.0.0 vpn_gateway"' >> /etc/openvpn/server/server.conf
+		echo 'push "route 192.168.0.0 255.255.0.0 vpn_gateway"' >> /etc/openvpn/server/server.conf
+		
+		# 国内主要运营商IP段
+		echo 'push "route 1.0.1.0 255.255.255.0 vpn_gateway"' >> /etc/openvpn/server/server.conf
+		echo 'push "route 1.2.4.0 255.255.252.0 vpn_gateway"' >> /etc/openvpn/server/server.conf
+		echo 'push "route 14.0.0.0 255.248.0.0 vpn_gateway"' >> /etc/openvpn/server/server.conf
+		echo 'push "route 14.16.0.0 255.252.0.0 vpn_gateway"' >> /etc/openvpn/server/server.conf
+		echo 'push "route 14.208.0.0 255.248.0.0 vpn_gateway"' >> /etc/openvpn/server/server.conf
+		echo 'push "route 27.0.0.0 255.248.0.0 vpn_gateway"' >> /etc/openvpn/server/server.conf
+		echo 'push "route 27.8.0.0 255.252.0.0 vpn_gateway"' >> /etc/openvpn/server/server.conf
+		echo 'push "route 36.0.0.0 255.248.0.0 vpn_gateway"' >> /etc/openvpn/server/server.conf
+		echo 'push "route 36.16.0.0 255.252.0.0 vpn_gateway"' >> /etc/openvpn/server/server.conf
+		echo 'push "route 58.0.0.0 255.248.0.0 vpn_gateway"' >> /etc/openvpn/server/server.conf
+		echo 'push "route 58.16.0.0 255.252.0.0 vpn_gateway"' >> /etc/openvpn/server/server.conf
+		echo 'push "route 58.60.0.0 255.252.0.0 vpn_gateway"' >> /etc/openvpn/server/server.conf
+		echo 'push "route 60.0.0.0 255.248.0.0 vpn_gateway"' >> /etc/openvpn/server/server.conf
+		echo 'push "route 101.0.0.0 255.224.0.0 vpn_gateway"' >> /etc/openvpn/server/server.conf
+		echo 'push "route 103.0.0.0 255.248.0.0 vpn_gateway"' >> /etc/openvpn/server/server.conf
+		echo 'push "route 106.0.0.0 255.248.0.0 vpn_gateway"' >> /etc/openvpn/server/server.conf
+		echo 'push "route 110.0.0.0 255.248.0.0 vpn_gateway"' >> /etc/openvpn/server/server.conf
+		echo 'push "route 111.0.0.0 255.248.0.0 vpn_gateway"' >> /etc/openvpn/server/server.conf
+		echo 'push "route 112.0.0.0 255.240.0.0 vpn_gateway"' >> /etc/openvpn/server/server.conf
+		echo 'push "route 114.0.0.0 255.224.0.0 vpn_gateway"' >> /etc/openvpn/server/server.conf
+		echo 'push "route 115.0.0.0 255.248.0.0 vpn_gateway"' >> /etc/openvpn/server/server.conf
+		echo 'push "route 116.0.0.0 255.248.0.0 vpn_gateway"' >> /etc/openvpn/server/server.conf
+		echo 'push "route 117.0.0.0 255.248.0.0 vpn_gateway"' >> /etc/openvpn/server/server.conf
+		echo 'push "route 118.0.0.0 255.248.0.0 vpn_gateway"' >> /etc/openvpn/server/server.conf
+		echo 'push "route 119.0.0.0 255.248.0.0 vpn_gateway"' >> /etc/openvpn/server/server.conf
+		echo 'push "route 120.0.0.0 255.248.0.0 vpn_gateway"' >> /etc/openvpn/server/server.conf
+		echo 'push "route 121.0.0.0 255.248.0.0 vpn_gateway"' >> /etc/openvpn/server/server.conf
+		echo 'push "route 122.0.0.0 255.248.0.0 vpn_gateway"' >> /etc/openvpn/server/server.conf
+		echo 'push "route 123.0.0.0 255.248.0.0 vpn_gateway"' >> /etc/openvpn/server/server.conf
+		echo 'push "route 124.0.0.0 255.248.0.0 vpn_gateway"' >> /etc/openvpn/server/server.conf
+		echo 'push "route 125.0.0.0 255.248.0.0 vpn_gateway"' >> /etc/openvpn/server/server.conf
+		echo 'push "route 140.64.0.0 255.252.0.0 vpn_gateway"' >> /etc/openvpn/server/server.conf
+		echo 'push "route 175.0.0.0 255.248.0.0 vpn_gateway"' >> /etc/openvpn/server/server.conf
+		echo 'push "route 180.64.0.0 255.192.0.0 vpn_gateway"' >> /etc/openvpn/server/server.conf
+		echo 'push "route 182.0.0.0 255.248.0.0 vpn_gateway"' >> /etc/openvpn/server/server.conf
+		echo 'push "route 202.0.0.0 255.248.0.0 vpn_gateway"' >> /etc/openvpn/server/server.conf
+		echo 'push "route 202.4.0.0 255.252.0.0 vpn_gateway"' >> /etc/openvpn/server/server.conf
+		echo 'push "route 202.8.0.0 255.252.0.0 vpn_gateway"' >> /etc/openvpn/server/server.conf
+		echo 'push "route 202.12.0.0 255.252.0.0 vpn_gateway"' >> /etc/openvpn/server/server.conf
+		echo 'push "route 202.16.0.0 255.252.0.0 vpn_gateway"' >> /etc/openvpn/server/server.conf
+		echo 'push "route 202.32.0.0 255.224.0.0 vpn_gateway"' >> /etc/openvpn/server/server.conf
+		echo 'push "route 202.64.0.0 255.224.0.0 vpn_gateway"' >> /etc/openvpn/server/server.conf
+		echo 'push "route 202.96.0.0 255.224.0.0 vpn_gateway"' >> /etc/openvpn/server/server.conf
+		echo 'push "route 202.128.0.0 255.192.0.0 vpn_gateway"' >> /etc/openvpn/server/server.conf
+		echo 'push "route 202.192.0.0 255.224.0.0 vpn_gateway"' >> /etc/openvpn/server/server.conf
+		echo 'push "route 218.0.0.0 255.248.0.0 vpn_gateway"' >> /etc/openvpn/server/server.conf
+		echo 'push "route 218.8.0.0 255.252.0.0 vpn_gateway"' >> /etc/openvpn/server/server.conf
+		echo 'push "route 218.16.0.0 255.252.0.0 vpn_gateway"' >> /etc/openvpn/server/server.conf
+		echo 'push "route 218.64.0.0 255.224.0.0 vpn_gateway"' >> /etc/openvpn/server/server.conf
+		echo 'push "route 219.128.0.0 255.224.0.0 vpn_gateway"' >> /etc/openvpn/server/server.conf
+		echo 'push "route 220.160.0.0 255.224.0.0 vpn_gateway"' >> /etc/openvpn/server/server.conf
+		echo 'push "route 221.0.0.0 255.248.0.0 vpn_gateway"' >> /etc/openvpn/server/server.conf
+		echo 'push "route 221.12.0.0 255.252.0.0 vpn_gateway"' >> /etc/openvpn/server/server.conf
+		echo 'push "route 221.176.0.0 255.240.0.0 vpn_gateway"' >> /etc/openvpn/server/server.conf
+		echo 'push "route 222.0.0.0 255.248.0.0 vpn_gateway"' >> /etc/openvpn/server/server.conf
+		echo 'push "route 222.16.0.0 255.252.0.0 vpn_gateway"' >> /etc/openvpn/server/server.conf
+		echo 'push "route 223.0.0.0 255.224.0.0 vpn_gateway"' >> /etc/openvpn/server/server.conf
+	else
+		# 全局代理模式
+		if [[ -z "$ip6" ]]; then
+			echo 'push "redirect-gateway def1 bypass-dhcp"' >> /etc/openvpn/server/server.conf
+		else
+			echo 'push "redirect-gateway def1 ipv6 bypass-dhcp"' >> /etc/openvpn/server/server.conf
+		fi
+	fi
+
+	# IPv6（保留原有逻辑，但在智能代理模式下不推送 IPv6 流量）
+	if [[ -z "$ip6" || "$proxy_mode" == "2" ]]; then
+		:
 	else
 		echo 'server-ipv6 fddd:1194:1194:1194::/64' >> /etc/openvpn/server/server.conf
 		echo 'push "redirect-gateway def1 ipv6 bypass-dhcp"' >> /etc/openvpn/server/server.conf
 	fi
+
 	echo 'ifconfig-pool-persist ipp.txt' >> /etc/openvpn/server/server.conf
 	# DNS
 	case "$dns" in
@@ -359,7 +451,7 @@ crl-verify crl.pem" >> /etc/openvpn/server/server.conf
 	echo 'net.ipv4.ip_forward=1' > /etc/sysctl.d/99-openvpn-forward.conf
 	# Enable without waiting for a reboot or service restart
 	echo 1 > /proc/sys/net/ipv4/ip_forward
-	if [[ -n "$ip6" ]]; then
+	if [[ -n "$ip6" && "$proxy_mode" != "2" ]]; then
 		# Enable net.ipv6.conf.all.forwarding for the system
 		echo "net.ipv6.conf.all.forwarding=1" >> /etc/sysctl.d/99-openvpn-forward.conf
 		# Enable without waiting for a reboot or service restart
@@ -377,7 +469,7 @@ crl-verify crl.pem" >> /etc/openvpn/server/server.conf
 		# Set NAT for the VPN subnet
 		firewall-cmd --direct --add-rule ipv4 nat POSTROUTING 0 -s 10.8.0.0/24 ! -d 10.8.0.0/24 -j SNAT --to "$ip"
 		firewall-cmd --permanent --direct --add-rule ipv4 nat POSTROUTING 0 -s 10.8.0.0/24 ! -d 10.8.0.0/24 -j SNAT --to "$ip"
-		if [[ -n "$ip6" ]]; then
+		if [[ -n "$ip6" && "$proxy_mode" != "2" ]]; then
 			firewall-ccmd --zone=trusted --add-source=fddd:1194:1194:1194::/64
 			firewall-cmd --permanent --zone=trusted --add-source=fddd:1194:1194:1194::/64
 			firewall-cmd --direct --add-rule ipv6 nat POSTROUTING 0 -s fddd:1194:1194:1194::/64 ! -d fddd:1194:1194:1194::/64 -j SNAT --to "$ip6"
@@ -406,7 +498,7 @@ ExecStop=$iptables_path -w 5 -t nat -D POSTROUTING -s 10.8.0.0/24 ! -d 10.8.0.0/
 ExecStop=$iptables_path -w 5 -D INPUT -p $protocol --dport $port -j ACCEPT
 ExecStop=$iptables_path -w 5 -D FORWARD -s 10.8.0.0/24 -j ACCEPT
 ExecStop=$iptables_path -w 5 -D FORWARD -m state --state RELATED,ESTABLISHED -j ACCEPT" > /etc/systemd/system/openvpn-iptables.service
-		if [[ -n "$ip6" ]]; then
+		if [[ -n "$ip6" && "$proxy_mode" != "2" ]]; then
 			echo "ExecStart=$ip6tables_path -w 5 -t nat -A POSTROUTING -s fddd:1194:1194:1194::/64 ! -d fddd:1194:1194:1194::/64 -j SNAT --to $ip6
 ExecStart=$ip6tables_path -w 5 -I FORWARD -s fddd:1194:1194:1194::/64 -j ACCEPT
 ExecStart=$ip6tables_path -w 5 -I FORWARD -m state --state RELATED,ESTABLISHED -j ACCEPT
@@ -430,7 +522,27 @@ WantedBy=multi-user.target" >> /etc/systemd/system/openvpn-iptables.service
 	# If the server is behind NAT, use the correct IP address
 	[[ -n "$public_ip" ]] && ip="$public_ip"
 	# client-common.txt is created so we have a template to add further users later
-	echo "client
+	# 根据代理模式生成客户端模板
+	if [[ "$proxy_mode" == "2" ]]; then
+		# 智能代理模式：客户端只需要添加服务器路由
+		echo "client
+dev tun
+proto $protocol
+remote $ip $port
+remote $ip $port
+resolv-retry infinite
+nobind
+persist-key
+persist-tun
+remote-cert-tls server
+auth SHA512
+ignore-unknown-option block-outside-dns
+verb 3
+
+# 智能路由：只让VPN服务器IP走VPN通道
+route $ip 255.255.255.255 vpn_gateway" > /etc/openvpn/server/client-common.txt
+	else
+		echo "client
 dev tun
 proto $protocol
 remote $ip $port
@@ -442,6 +554,7 @@ remote-cert-tls server
 auth SHA512
 ignore-unknown-option block-outside-dns
 verb 3" > /etc/openvpn/server/client-common.txt
+	fi
 	# Enable and start the OpenVPN service
 	systemctl enable --now openvpn-server@server.service
 	# Build the $client.ovpn file, stripping comments from easy-rsa in the process
@@ -450,6 +563,7 @@ verb 3" > /etc/openvpn/server/client-common.txt
 	echo "Finished!"
 	echo
 	echo "The client configuration is available in:" "$script_dir"/"$client.ovpn"
+	echo "Proxy mode: $([[ "$proxy_mode" == "2" ]] && echo "Smart proxy (Domestic direct, Overseas via VPN)" || echo "Global proxy (all traffic through VPN)")"
 	echo "New clients can be added by running this script again."
 else
 	clear

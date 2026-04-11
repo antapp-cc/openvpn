@@ -15,6 +15,70 @@ fi
 # Discard stdin. Needed when running from a one-liner which includes a newline
 read -N 999999 -t 0.001
 
+# Function to convert CIDR prefix to subnet mask
+cidr2mask() {
+    local i mask=""
+    local full_octets=$(($1/8))
+    local partial_octet=$(($1%8))
+    for ((i=0;i<4;i+=1)); do
+        if [ $i -lt $full_octets ]; then
+            mask+=255
+        elif [ $i -eq $full_octets ]; then
+            mask+=$((256 - 2**(8-$partial_octet)))
+        else
+            mask+=0
+        fi
+        test $i -lt 3 && mask+=.
+    done
+    echo $mask
+}
+
+# Function to download and generate China IP routes (Optimized)
+generate_china_routes() {
+    echo "Downloading China IP list for split routing..."
+    local cn_temp_file="/tmp/cn_zone.txt"
+    local urls=("https://raw.githubusercontent.com/17mon/china_ip_list/master/china_ip_list.txt" "http://www.ipdeny.com/ipblocks/data/countries/cn.zone")
+    local downloaded=0
+    
+    for url in "${urls[@]}"; do
+        if wget -T 15 -t 2 -qO "$cn_temp_file" "$url" 2>/dev/null || curl -m 15 -sL "$url" -o "$cn_temp_file" 2>/dev/null; then
+            if [[ -s "$cn_temp_file" ]]; then
+                downloaded=1
+                sed -i 's/\r//g' "$cn_temp_file"
+                break
+            fi
+        fi
+    done
+
+    if [[ "$downloaded" -eq 0 ]]; then
+        echo "Error: Failed to download China IP list. Will use global proxy."
+        return 1
+    fi
+
+    echo "Filtering and generating routing rules..."
+    local route_count=0
+    echo "# China direct routes" >> /etc/openvpn/server/client-common.txt
+    while read -r cidr; do
+        [[ -z "$cidr" || "$cidr" =~ ^# ]] && continue
+        if [[ "$cidr" == *"/"* ]]; then
+            local ip=$(echo "$cidr" | cut -d'/' -f1)
+            local prefix=$(echo "$cidr" | cut -d'/' -f2)
+            if [[ "$prefix" -gt 16 ]]; then
+                continue
+            fi
+        else
+            continue
+        fi
+        local mask=$(cidr2mask "$prefix")
+        echo "route $ip $mask net_gateway" >> /etc/openvpn/server/client-common.txt
+        route_count=$((route_count+1))
+    done < "$cn_temp_file"
+    
+    rm -f "$cn_temp_file"
+    echo "Successfully added $route_count major China routes."
+    return 0
+}
+
 # Detect OS
 # $os_version variables aren't always in use, but are kept here for convenience
 if grep -qs "ubuntu" /etc/os-release; then
@@ -110,7 +174,7 @@ if [[ ! -e /etc/openvpn/server/server.conf ]]; then
 		[[ -z "$ip_number" ]] && ip_number="1"
 		ip=$(ip -4 addr | grep inet | grep -vE '127(\.[0-9]{1,3}){3}' | cut -d '/' -f 1 | grep -oE '[0-9]{1,3}(\.[0-9]{1,3}){3}' | sed -n "$ip_number"p)
 	fi
-	# If $ip is a private IP address, the server must be behind NAT
+	# If $ip is a private IP address, the server must be behind NAT
 	if echo "$ip" | grep -qE '^(10\.|172\.1[6789]\.|172\.2[0-9]\.|172\.3[01]\.|192\.168)'; then
 		echo
 		echo "This server is behind NAT. What is the public IPv4 address or hostname?"
@@ -205,6 +269,19 @@ if [[ ! -e /etc/openvpn/server/server.conf ]]; then
 			fi
 		done
 	fi
+	
+	echo
+	echo "Select a routing mode for the clients:"
+	echo "   1) Global proxy (全局代理，所有流量走VPN)"
+	echo "   2) Split tunnel (手动分流，仅指定网段走VPN)"
+	echo "   3) China bypass (国内外分流，国外走VPN，国内走本地网络)"
+	read -p "Routing mode [3]: " routing
+	until [[ -z "$routing" || "$routing" =~ ^[1-3]$ ]]; do
+		echo "$routing: invalid selection."
+		read -p "Routing mode [3]: " routing
+	done
+	[[ -z "$routing" ]] && routing="3"
+
 	echo
 	echo "Enter a name for the first client:"
 	read -p "Name [client]: " unsanitized_client
@@ -217,11 +294,8 @@ if [[ ! -e /etc/openvpn/server/server.conf ]]; then
 	if ! systemctl is-active --quiet firewalld.service && ! hash iptables 2>/dev/null; then
 		if [[ "$os" == "centos" || "$os" == "fedora" ]]; then
 			firewall="firewalld"
-			# We don't want to silently enable firewalld, so we give a subtle warning
-			# If the user continues, firewalld will be installed and enabled during setup
 			echo "firewalld, which is required to manage routing tables, will also be installed."
 		elif [[ "$os" == "debian" || "$os" == "ubuntu" ]]; then
-			# iptables is way less invasive than firewalld so no warning is given
 			firewall="iptables"
 		fi
 	fi
@@ -292,12 +366,18 @@ tls-crypt tc.key
 topology subnet
 server 10.8.0.0 255.255.255.0" > /etc/openvpn/server/server.conf
 	# IPv6
-	if [[ -z "$ip6" ]]; then
-		echo 'push "redirect-gateway def1 bypass-dhcp"' >> /etc/openvpn/server/server.conf
-	else
+	if [[ -n "$ip6" ]]; then
 		echo 'server-ipv6 fddd:1194:1194:1194::/64' >> /etc/openvpn/server/server.conf
-		echo 'push "redirect-gateway def1 ipv6 bypass-dhcp"' >> /etc/openvpn/server/server.conf
 	fi
+	# Routing mode configuration
+	if [[ "$routing" == "1" || "$routing" == "3" ]]; then
+		if [[ -z "$ip6" ]]; then
+			echo 'push "redirect-gateway def1 bypass-dhcp"' >> /etc/openvpn/server/server.conf
+		else
+			echo 'push "redirect-gateway def1 ipv6 bypass-dhcp"' >> /etc/openvpn/server/server.conf
+		fi
+	fi
+
 	echo 'ifconfig-pool-persist ipp.txt' >> /etc/openvpn/server/server.conf
 	# DNS
 	case "$dns" in
@@ -442,6 +522,35 @@ remote-cert-tls server
 auth SHA512
 ignore-unknown-option block-outside-dns
 verb 3" > /etc/openvpn/server/client-common.txt
+
+	# Add routing configuration based on mode
+	case "$routing" in
+		2)
+			# Split tunnel - manual routes needed (No redirect-gateway is pushed by server)
+			echo "
+# Split tunnel configuration
+# Add your custom routes below (format: route IP MASK vpn_gateway)
+" >> /etc/openvpn/server/client-common.txt
+			;;
+		3)
+			# China bypass
+			echo "
+# China bypass routing
+# Default all traffic through VPN, China IPs go direct" >> /etc/openvpn/server/client-common.txt
+			
+			# Generate China IP routes
+			if ! generate_china_routes; then
+				# Fallback: if download fails, remove bypass lines and keep global proxy
+				sed -i '/China bypass routing/d; /Default all traffic through VPN/d' /etc/openvpn/server/client-common.txt
+				if [[ -z "$ip6" ]]; then
+					echo 'push "redirect-gateway def1 bypass-dhcp"' >> /etc/openvpn/server/server.conf
+				else
+					echo 'push "redirect-gateway def1 ipv6 bypass-dhcp"' >> /etc/openvpn/server/server.conf
+				fi
+			fi
+			;;
+	esac
+
 	# Enable and start the OpenVPN service
 	systemctl enable --now openvpn-server@server.service
 	# Build the $client.ovpn file, stripping comments from easy-rsa in the process

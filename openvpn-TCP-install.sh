@@ -33,7 +33,7 @@ cidr2mask() {
     echo $mask
 }
 
-# Function to download and generate China IP routes
+# Function to download and generate China IP routes (Optimized to prevent client crash)
 generate_china_routes() {
     echo "Downloading China IP list for split routing..."
     local cn_temp_file="/tmp/cn_zone.txt"
@@ -46,17 +46,20 @@ generate_china_routes() {
         if wget -T 15 -t 2 -qO "$cn_temp_file" "$url" 2>/dev/null || curl -m 15 -sL "$url" -o "$cn_temp_file" 2>/dev/null; then
             if [[ -s "$cn_temp_file" ]]; then
                 downloaded=1
+                # Clean Windows line breaks to prevent mask calculation errors
+                sed -i 's/\r//g' "$cn_temp_file"
                 break
             fi
         fi
     done
 
     if [[ "$downloaded" -eq 0 ]]; then
-        echo "Error: Failed to download China IP list. Falling back to global proxy."
+        echo "Error: Failed to download China IP list. Will use global proxy."
         return 1
     fi
 
-    echo "Generating routing rules, please wait..."
+    echo "Filtering and generating routing rules..."
+    local route_count=0
     echo "# China direct routes" >> /etc/openvpn/server/client-common.txt
     while read -r cidr; do
         # Skip empty lines and comments
@@ -65,16 +68,21 @@ generate_china_routes() {
         if [[ "$cidr" == *"/"* ]]; then
             local ip=$(echo "$cidr" | cut -d'/' -f1)
             local prefix=$(echo "$cidr" | cut -d'/' -f2)
+            # ONLY include major subnets (/16 and larger) to prevent OpenVPN client crashes due to too many routes
+            if [[ "$prefix" -gt 16 ]]; then
+                continue
+            fi
         else
-            local ip="$cidr"
-            local prefix="32"
+            # Skip single IPs
+            continue
         fi
         local mask=$(cidr2mask "$prefix")
         echo "route $ip $mask net_gateway" >> /etc/openvpn/server/client-common.txt
+        route_count=$((route_count+1))
     done < "$cn_temp_file"
     
     rm -f "$cn_temp_file"
-    echo "China bypass routing rules added successfully."
+    echo "Successfully added $route_count major China routes (smaller subnets ignored for stability)."
     return 0
 }
 
@@ -293,11 +301,8 @@ if [[ ! -e /etc/openvpn/server/server.conf ]]; then
 	if ! systemctl is-active --quiet firewalld.service && ! hash iptables 2>/dev/null; then
 		if [[ "$os" == "centos" || "$os" == "fedora" ]]; then
 			firewall="firewalld"
-			# We don't want to silently enable firewalld, so we give a subtle warning
-			# If the user continues, firewalld will be installed and enabled during setup
 			echo "firewalld, which is required to manage routing tables, will also be installed."
 		elif [[ "$os" == "debian" || "$os" == "ubuntu" ]]; then
-			# iptables is way less invasive than firewalld so no warning is given
 			firewall="iptables"
 		fi
 	fi
@@ -315,7 +320,6 @@ LimitNPROC=infinity" > /etc/systemd/system/openvpn-server@server.service.d/disab
 		dnf install -y epel-release
 		dnf install -y openvpn openssl ca-certificates tar $firewall
 	else
-		# Else, OS must be Fedora
 		dnf install -y openvpn openssl ca-certificates tar $firewall
 	fi
 	# If firewalld was just installed, enable it
@@ -341,18 +345,13 @@ YdEIqUuyyOP7uWrat2DX9GgdT0Kj3jlN9K5W7edjcrsZCwenyO4KbXCeAvzhzffi
 7MA0BM0oNC9hkXL+nOmFg/+OTxIy7vKBg8P+OxtMb61zO7X8vC7CIAXFjvGDfRaD
 ssbzSibBsu/6iGtCOGEoXJf//////////wIBAg==
 -----END DH PARAMETERS-----' > /etc/openvpn/server/dh.pem
-	# Make easy-rsa aware of our external DH file (prevents a warning)
 	ln -s /etc/openvpn/server/dh.pem pki/dh.pem
-	# Create certificates and CRL
 	./easyrsa --batch --days=3650 build-server-full server nopass
 	./easyrsa --batch --days=3650 build-client-full "$client" nopass
 	./easyrsa --batch --days=3650 gen-crl
-	# Move the stuff we need
 	cp pki/ca.crt pki/private/ca.key pki/issued/server.crt pki/private/server.key pki/crl.pem /etc/openvpn/server
 	cp pki/private/easyrsa-tls.key /etc/openvpn/server/tc.key
-	# CRL is read with each client connection, while OpenVPN is dropped to nobody
 	chown nobody:"$group_name" /etc/openvpn/server/crl.pem
-	# Without +x in the directory, OpenVPN can't run a stat() on the CRL file
 	chmod o+x /etc/openvpn/server/
 	# Generate server.conf
 	echo "local $ip
@@ -372,33 +371,25 @@ server 10.8.0.0 255.255.255.0" > /etc/openvpn/server/server.conf
 		echo 'server-ipv6 fddd:1194:1194:1194::/64' >> /etc/openvpn/server/server.conf
 	fi
 	
-	# Routing mode configuration
-	case "$routing" in
-		1|"")
-			# Global proxy
-			if [[ -z "$ip6" ]]; then
-				echo 'push "redirect-gateway def1 bypass-dhcp"' >> /etc/openvpn/server/server.conf
-			else
-				echo 'push "redirect-gateway def1 ipv6 bypass-dhcp"' >> /etc/openvpn/server/server.conf
-			fi
-			;;
-		2|3)
-			# Split tunneling modes don't push redirect-gateway
-			;;
-	esac
+	# For routing modes 1 and 3, push global redirect.
+	# Mode 3 will override specific routes via the client config later.
+	if [[ "$routing" == "1" || "$routing" == "3" ]]; then
+		if [[ -z "$ip6" ]]; then
+			echo 'push "redirect-gateway def1 bypass-dhcp"' >> /etc/openvpn/server/server.conf
+		else
+			echo 'push "redirect-gateway def1 ipv6 bypass-dhcp"' >> /etc/openvpn/server/server.conf
+		fi
+	fi
 
 	echo 'ifconfig-pool-persist ipp.txt' >> /etc/openvpn/server/server.conf
 	# DNS
 	case "$dns" in
 		1|"")
-			# Locate the proper resolv.conf
-			# Needed for systems running systemd-resolved
 			if grep '^nameserver' "/etc/resolv.conf" | grep -qv '127.0.0.53' ; then
 				resolv_conf="/etc/resolv.conf"
 			else
 				resolv_conf="/run/systemd/resolve/resolv.conf"
 			fi
-			# Obtain the resolvers from resolv.conf and use them for OpenVPN
 			grep -v '^#\|^;' "$resolv_conf" | grep '^nameserver' | grep -v '127.0.0.53' | grep -oE '[0-9]{1,3}(\.[0-9]{1,3}){3}' | while read line; do
 				echo "push \"dhcp-option DNS $line\"" >> /etc/openvpn/server/server.conf
 			done
@@ -444,26 +435,17 @@ crl-verify crl.pem" >> /etc/openvpn/server/server.conf
 	if [[ "$protocol" = "udp" ]]; then
 		echo "explicit-exit-notify" >> /etc/openvpn/server/server.conf
 	fi
-	# Enable net.ipv4.ip_forward for the system
 	echo 'net.ipv4.ip_forward=1' > /etc/sysctl.d/99-openvpn-forward.conf
-	# Enable without waiting for a reboot or service restart
 	echo 1 > /proc/sys/net/ipv4/ip_forward
 	if [[ -n "$ip6" ]]; then
-		# Enable net.ipv6.conf.all.forwarding for the system
 		echo "net.ipv6.conf.all.forwarding=1" >> /etc/sysctl.d/99-openvpn-forward.conf
-		# Enable without waiting for a reboot or service restart
 		echo 1 > /proc/sys/net/ipv6/conf/all/forwarding
 	fi
 	if systemctl is-active --quiet firewalld.service; then
-		# Using both permanent and not permanent rules to avoid a firewalld
-		# reload.
-		# We don't use --add-service=openvpn because that would only work with
-		# the default port and protocol.
 		firewall-cmd --add-port="$port"/"$protocol"
 		firewall-cmd --zone=trusted --add-source=10.8.0.0/24
 		firewall-cmd --permanent --add-port="$port"/"$protocol"
 		firewall-cmd --permanent --zone=trusted --add-source=10.8.0.0/24
-		# Set NAT for the VPN subnet
 		firewall-cmd --direct --add-rule ipv4 nat POSTROUTING 0 -s 10.8.0.0/24 ! -d 10.8.0.0/24 -j SNAT --to "$ip"
 		firewall-cmd --permanent --direct --add-rule ipv4 nat POSTROUTING 0 -s 10.8.0.0/24 ! -d 10.8.0.0/24 -j SNAT --to "$ip"
 		if [[ -n "$ip6" ]]; then
@@ -473,11 +455,8 @@ crl-verify crl.pem" >> /etc/openvpn/server/server.conf
 			firewall-cmd --permanent --direct --add-rule ipv6 nat POSTROUTING 0 -s fddd:1194:1194:1194::/64 ! -d fddd:1194:1194:1194::/64 -j SNAT --to "$ip6"
 		fi
 	else
-		# Create a service to set up persistent iptables rules
 		iptables_path=$(command -v iptables)
 		ip6tables_path=$(command -v ip6tables)
-		# nf_tables is not available as standard in OVZ kernels. So use iptables-legacy
-		# if we are in OVZ, with a nf_tables backend and iptables-legacy is available.
 		if [[ $(systemd-detect-virt) == "openvz" ]] && readlink -f "$(command -v iptables)" | grep -q "nft" && hash iptables-legacy 2>/dev/null; then
 			iptables_path=$(command -v iptables-legacy)
 			ip6tables_path=$(command -v ip6tables-legacy)
@@ -508,16 +487,14 @@ ExecStop=$ip6tables_path -w 5 -D FORWARD -m state --state RELATED,ESTABLISHED -j
 WantedBy=multi-user.target" >> /etc/systemd/system/openvpn-iptables.service
 		systemctl enable --now openvpn-iptables.service
 	fi
-	# If SELinux is enabled and a custom port was selected, we need this
 	if sestatus 2>/dev/null | grep "Current mode" | grep -q "enforcing" && [[ "$port" != 1194 ]]; then
-		# Install semanage if not already present
 		if ! hash semanage 2>/dev/null; then
 				dnf install -y policycoreutils-python-utils
 		fi
 		semanage port -a -t openvpn_port_t -p "$protocol" "$port"
 	fi
-	# If the server is behind NAT, use the correct IP address
 	[[ -n "$public_ip" ]] && ip="$public_ip"
+	
 	# client-common.txt is created so we have a template to add further users later
 	echo "client
 dev tun
@@ -535,7 +512,7 @@ verb 3" > /etc/openvpn/server/client-common.txt
 	# Add routing configuration based on mode
 	case "$routing" in
 		2)
-			# Split tunnel - manual routes needed
+			# Split tunnel - manual routes needed (No redirect-gateway is pushed by server)
 			echo "
 # Split tunnel configuration
 # Add your custom routes below (format: route IP MASK vpn_gateway)
@@ -543,28 +520,22 @@ verb 3" > /etc/openvpn/server/client-common.txt
 			;;
 		3)
 			# China bypass
-			echo "max-routes 10000
-route-nopull
-# Default route through VPN
-route 0.0.0.0 128.0.0.0 vpn_gateway
-route 128.0.0.0 128.0.0.0 vpn_gateway" >> /etc/openvpn/server/client-common.txt
+			# We rely on the server pushing 'redirect-gateway def1' (global VPN)
+			# Then we inject major China routes going to net_gateway to bypass it.
+			# We DO NOT use route-nopull, to ensure DNS and full tunnel work correctly.
+			echo "
+# China bypass routing
+# Default all traffic through VPN, China IPs go direct" >> /etc/openvpn/server/client-common.txt
 			
 			# Generate China IP routes
 			if ! generate_china_routes; then
-				# Fallback to global proxy if download fails
-				sed -i '/max-routes/d; /route-nopull/d; /route 0.0.0.0/d; /route 128.0.0.0/d; /China direct routes/d' /etc/openvpn/server/client-common.txt
-				if [[ -z "$ip6" ]]; then
-					echo 'push "redirect-gateway def1 bypass-dhcp"' >> /etc/openvpn/server/server.conf
-				else
-					echo 'push "redirect-gateway def1 ipv6 bypass-dhcp"' >> /etc/openvpn/server/server.conf
-				fi
+				# Fallback: if download fails, remove bypass lines and keep global proxy
+				sed -i '/China bypass routing/d; /China direct routes/d' /etc/openvpn/server/client-common.txt
 			fi
 			;;
 	esac
 
-	# Enable and start the OpenVPN service
 	systemctl enable --now openvpn-server@server.service
-	# Build the $client.ovpn file, stripping comments from easy-rsa in the process
 	grep -vh '^#' /etc/openvpn/server/client-common.txt /etc/openvpn/server/easy-rsa/pki/inline/private/"$client".inline > "$script_dir"/"$client".ovpn
 	echo
 	echo "Finished!"
@@ -598,15 +569,12 @@ else
 			done
 			cd /etc/openvpn/server/easy-rsa/
 			./easyrsa --batch --days=3650 build-client-full "$client" nopass
-			# Build the $client.ovpn file, stripping comments from easy-rsa in the process
 			grep -vh '^#' /etc/openvpn/server/client-common.txt /etc/openvpn/server/easy-rsa/pki/inline/private/"$client".inline > "$script_dir"/"$client".ovpn
 			echo
-			echo "$client added. Configuration available in:" "$script_dir"/"$client.ovpn"
+			echo "$client added. Configuration available in:" "$script_dir"/"$client".ovpn"
 			exit
 		;;
 		2)
-			# This option could be documented a bit better and maybe even be simplified
-			# ...but what can I say, I want some sleep too
 			number_of_clients=$(tail -n +2 /etc/openvpn/server/easy-rsa/pki/index.txt | grep -c "^V")
 			if [[ "$number_of_clients" = 0 ]]; then
 				echo
@@ -636,7 +604,6 @@ else
 				rm -f /etc/openvpn/server/easy-rsa/pki/reqs/"$client".req
 				rm -f /etc/openvpn/server/easy-rsa/pki/private/"$client".key
 				cp /etc/openvpn/server/easy-rsa/pki/crl.pem /etc/openvpn/server/crl.pem
-				# CRL is read with each client connection, when OpenVPN is dropped to nobody
 				chown nobody:"$group_name" /etc/openvpn/server/crl.pem
 				echo
 				echo "$client revoked!"
@@ -658,7 +625,6 @@ else
 				protocol=$(grep '^proto ' /etc/openvpn/server/server.conf | cut -d " " -f 2)
 				if systemctl is-active --quiet firewalld.service; then
 					ip=$(firewall-cmd --direct --get-rules ipv4 nat POSTROUTING | grep '\-s 10.8.0.0/24 '"'"'!'"'"' -d 10.8.0.0/24' | grep -oE '[^ ]+$')
-					# Using both permanent and not permanent rules to avoid a firewalld reload.
 					firewall-cmd --remove-port="$port"/"$protocol"
 					firewall-cmd --zone=trusted --remove-source=10.8.0.0/24
 					firewall-cmd --permanent --remove-port="$port"/"$protocol"
@@ -686,7 +652,6 @@ else
 					rm -rf /etc/openvpn/server
 					apt-get remove --purge -y openvpn
 				else
-					# Else, OS must be CentOS or Fedora
 					dnf remove -y openvpn
 					rm -rf /etc/openvpn/server
 				fi

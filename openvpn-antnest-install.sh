@@ -201,18 +201,18 @@ if command -v nft >/dev/null 2>&1; then
     nft_ok=1
   fi
 fi
-if [[ "$nft_ok" != "1" ]]; then
-  iptables -t nat -D PREROUTING -p tcp --dport 31400:31409 -j DNAT --to-destination "$target" 2>/dev/null || true
-  iptables -t nat -D POSTROUTING -d "$target" -p tcp --dport 31400:31409 -j MASQUERADE 2>/dev/null || true
-  iptables -t nat -D POSTROUTING -s 10.8.0.0/24 -j MASQUERADE 2>/dev/null || true
-  iptables -t nat -D POSTROUTING -s 10.9.0.0/24 -j MASQUERADE 2>/dev/null || true
-  iptables -D FORWARD -p tcp -d "$target" --dport 31400:31409 -j ACCEPT 2>/dev/null || true
-  iptables -t nat -A PREROUTING -p tcp --dport 31400:31409 -j DNAT --to-destination "$target"
-  iptables -t nat -A POSTROUTING -d "$target" -p tcp --dport 31400:31409 -j MASQUERADE
-  iptables -t nat -A POSTROUTING -s 10.8.0.0/24 -j MASQUERADE
-  iptables -t nat -A POSTROUTING -s 10.9.0.0/24 -j MASQUERADE
-  iptables -A FORWARD -p tcp -d "$target" --dport 31400:31409 -j ACCEPT
-fi
+for old_target in 10.8.0.2 10.9.0.2 "$target"; do
+  iptables -t nat -D PREROUTING -p tcp --dport 31400:31409 -j DNAT --to-destination "$old_target" 2>/dev/null || true
+  iptables -t nat -D POSTROUTING -d "$old_target" -p tcp --dport 31400:31409 -j MASQUERADE 2>/dev/null || true
+  iptables -D FORWARD -p tcp -d "$old_target" --dport 31400:31409 -j ACCEPT 2>/dev/null || true
+done
+iptables -t nat -D POSTROUTING -s 10.8.0.0/24 -j MASQUERADE 2>/dev/null || true
+iptables -t nat -D POSTROUTING -s 10.9.0.0/24 -j MASQUERADE 2>/dev/null || true
+iptables -t nat -A PREROUTING -p tcp --dport 31400:31409 -j DNAT --to-destination "$target"
+iptables -t nat -A POSTROUTING -d "$target" -p tcp --dport 31400:31409 -j MASQUERADE
+iptables -t nat -A POSTROUTING -s 10.8.0.0/24 -j MASQUERADE
+iptables -t nat -A POSTROUTING -s 10.9.0.0/24 -j MASQUERADE
+iptables -A FORWARD -p tcp -d "$target" --dport 31400:31409 -j ACCEPT
 cat > /etc/antnest-port-forward.conf <<STATE
 target=$target
 ports=31400-31409/tcp

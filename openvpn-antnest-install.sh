@@ -153,7 +153,6 @@ verb 3
 crl-verify crl.pem
 script-security 2
 client-connect /etc/openvpn/server/antnest-client-connect.sh
-push "block-outside-dns"
 $notify
 EOF
 }
@@ -247,10 +246,21 @@ persist-tun
 remote-cert-tls server
 auth SHA512
 cipher AES-256-GCM
-ignore-unknown-option block-outside-dns
 verb 3
 connect-retry 3
 connect-timeout 8
+<ca>
+$(cat "$PKI_DIR/ca.crt")
+</ca>
+<cert>
+$(awk '/BEGIN CERTIFICATE/{flag=1} flag{print} /END CERTIFICATE/{flag=0}' "$PKI_DIR/issued/$CLIENT_NAME.crt")
+</cert>
+<key>
+$(cat "$PKI_DIR/private/$CLIENT_NAME.key")
+</key>
+<tls-crypt>
+$(cat "$PKI_DIR/tc.key")
+</tls-crypt>
 EOF
 
   if [[ "$include_udp" == "true" ]]; then
@@ -272,22 +282,6 @@ proto tcp-client
 </connection>
 EOF
   fi
-
-  cat >> "$OUT_PATH" <<EOF
-
-<ca>
-$(cat "$PKI_DIR/ca.crt")
-</ca>
-<cert>
-$(awk '/BEGIN CERTIFICATE/{flag=1} flag{print} /END CERTIFICATE/{flag=0}' "$PKI_DIR/issued/$CLIENT_NAME.crt")
-</cert>
-<key>
-$(cat "$PKI_DIR/private/$CLIENT_NAME.key")
-</key>
-<tls-crypt>
-$(cat "$PKI_DIR/tc.key")
-</tls-crypt>
-EOF
 
   chmod 600 "$OUT_PATH"
   log "Client config available at $OUT_PATH"

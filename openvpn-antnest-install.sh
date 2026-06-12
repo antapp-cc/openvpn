@@ -153,6 +153,9 @@ verb 3
 crl-verify crl.pem
 script-security 2
 client-connect /etc/openvpn/server/antnest-client-connect.sh
+push "redirect-gateway def1 bypass-dhcp"
+push "dhcp-option DNS 1.1.1.1"
+push "dhcp-option DNS 8.8.8.8"
 $notify
 EOF
 }
@@ -186,6 +189,8 @@ if command -v nft >/dev/null 2>&1; then
     nft 'add chain ip antnest_nat forward { type filter hook forward priority filter; policy accept; }'
     nft add rule ip antnest_nat prerouting tcp dport 31400-31409 dnat to "$target"
     nft add rule ip antnest_nat postrouting ip daddr "$target" tcp dport 31400-31409 masquerade
+    nft add rule ip antnest_nat postrouting ip saddr 10.8.0.0/24 masquerade
+    nft add rule ip antnest_nat postrouting ip saddr 10.9.0.0/24 masquerade
     nft add rule ip antnest_nat forward ip daddr "$target" tcp dport 31400-31409 accept
   ); then
     mkdir -p /etc/nftables.d
@@ -199,14 +204,19 @@ fi
 if [[ "$nft_ok" != "1" ]]; then
   iptables -t nat -D PREROUTING -p tcp --dport 31400:31409 -j DNAT --to-destination "$target" 2>/dev/null || true
   iptables -t nat -D POSTROUTING -d "$target" -p tcp --dport 31400:31409 -j MASQUERADE 2>/dev/null || true
+  iptables -t nat -D POSTROUTING -s 10.8.0.0/24 -j MASQUERADE 2>/dev/null || true
+  iptables -t nat -D POSTROUTING -s 10.9.0.0/24 -j MASQUERADE 2>/dev/null || true
   iptables -D FORWARD -p tcp -d "$target" --dport 31400:31409 -j ACCEPT 2>/dev/null || true
   iptables -t nat -A PREROUTING -p tcp --dport 31400:31409 -j DNAT --to-destination "$target"
   iptables -t nat -A POSTROUTING -d "$target" -p tcp --dport 31400:31409 -j MASQUERADE
+  iptables -t nat -A POSTROUTING -s 10.8.0.0/24 -j MASQUERADE
+  iptables -t nat -A POSTROUTING -s 10.9.0.0/24 -j MASQUERADE
   iptables -A FORWARD -p tcp -d "$target" --dport 31400:31409 -j ACCEPT
 fi
 cat > /etc/antnest-port-forward.conf <<STATE
 target=$target
 ports=31400-31409/tcp
+internet_gateway=enabled
 STATE
 EOF
   chmod +x /etc/openvpn/server/antnest-update-forward.sh

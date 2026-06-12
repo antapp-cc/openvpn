@@ -55,6 +55,20 @@ log() {
   echo "[antnest-openvpn] $*"
 }
 
+apt_retry() {
+  local description="$1"
+  shift
+  log "$description"
+  if "$@"; then
+    return 0
+  fi
+
+  log "$description failed, cleaning apt cache and retrying"
+  apt-get clean
+  apt-get update -y -o Acquire::Retries=3 --fix-missing
+  "$@"
+}
+
 public_ip() {
   local ip
   ip="$(curl -4fsS --connect-timeout 5 https://api.ipify.org 2>/dev/null || true)"
@@ -69,8 +83,8 @@ public_ip() {
 
 install_packages() {
   log "Installing OpenVPN dependencies"
-  apt-get update -y
-  apt-get install -y openvpn easy-rsa iptables curl ca-certificates
+  apt_retry "Updating apt package index" apt-get update -y -o Acquire::Retries=3 --fix-missing
+  apt_retry "Installing OpenVPN dependencies" apt-get install -y -o Acquire::Retries=3 --fix-missing openvpn easy-rsa iptables curl ca-certificates
 }
 
 ensure_pki() {

@@ -34,11 +34,15 @@ pick_target() {
         ;;
     esac
   done
-  # No OpenVPN hook context: prefer TCP fallback when it is actually reachable.
-  for candidate in 10.9.0.2 10.8.0.2; do
-    if ping -c 1 -W 1 "$candidate" >/dev/null 2>&1; then
-      echo "$candidate"
-      return 0
+  for status_file in /var/log/openvpn-antnest-tcp-status.log /var/log/openvpn-antnest-udp-status.log; do
+    if [[ -f "$status_file" ]]; then
+      candidate="$(grep -oE '10\.(8|9)\.0\.2' "$status_file" 2>/dev/null | head -n1 || true)"
+      case "$candidate" in
+        10.8.0.2|10.9.0.2)
+          echo "$candidate"
+          return 0
+          ;;
+      esac
     fi
   done
   echo "10.8.0.2"
@@ -46,14 +50,16 @@ pick_target() {
 
 write_conf() {
   local target="$1"
-  cat > /etc/rinetd.conf <<EOF
+  local tmp="/tmp/antnest-rinetd.conf.$$"
+  cat > "$tmp" <<EOF
 # AntNest Pi Node port forwarding
 # Auto-generated. 31400-31409 -> current OpenVPN client.
 EOF
   local port
   for port in $(seq 31400 31409); do
-    echo "0.0.0.0 $port $target $port" >> /etc/rinetd.conf
+    echo "0.0.0.0 $port $target $port" >> "$tmp"
   done
+  mv -f "$tmp" /etc/rinetd.conf
   cat > /etc/antnest-rinetd-state.conf <<EOF
 target=$target
 ports=31400-31409/tcp
@@ -100,9 +106,19 @@ verify_listen() {
 
 install_hook() {
   mkdir -p /etc/openvpn/server
+  if command -v systemctl >/dev/null 2>&1; then
+    systemctl stop antnest-rinetd-watch.service 2>/dev/null || true
+    systemctl disable antnest-rinetd-watch.service 2>/dev/null || true
+  fi
+  pkill -f 'antnest-rinetd-refresh.sh.*sleep 5' 2>/dev/null || true
+
   cat > /etc/openvpn/server/antnest-rinetd-refresh.sh <<'EOF'
 #!/usr/bin/env bash
 set -u
+exec 9>/run/antnest-rinetd-refresh.lock
+if ! flock -n 9; then
+  exit 0
+fi
 
 pick_target() {
   local candidate
@@ -114,12 +130,15 @@ pick_target() {
         ;;
     esac
   done
-  # Periodic refresh has no OpenVPN hook variables. Prefer TCP when it is alive,
-  # because it is the fallback path after UDP is blocked.
-  for candidate in 10.9.0.2 10.8.0.2; do
-    if ping -c 1 -W 1 "$candidate" >/dev/null 2>&1; then
-      echo "$candidate"
-      return 0
+  for status_file in /var/log/openvpn-antnest-tcp-status.log /var/log/openvpn-antnest-udp-status.log; do
+    if [[ -f "$status_file" ]]; then
+      candidate="$(grep -oE '10\.(8|9)\.0\.2' "$status_file" 2>/dev/null | head -n1 || true)"
+      case "$candidate" in
+        10.8.0.2|10.9.0.2)
+          echo "$candidate"
+          return 0
+          ;;
+      esac
     fi
   done
   echo "10.8.0.2"
@@ -135,13 +154,15 @@ if [[ "$current" == "$target" ]] && pgrep -x rinetd >/dev/null 2>&1; then
   exit 0
 fi
 
-cat > /etc/rinetd.conf <<CONF
+tmp="/tmp/antnest-rinetd.conf.$$"
+cat > "$tmp" <<CONF
 # AntNest Pi Node port forwarding
 # Auto-generated. 31400-31409 -> current OpenVPN client.
 CONF
 for port in $(seq 31400 31409); do
-  echo "0.0.0.0 $port $target $port" >> /etc/rinetd.conf
+  echo "0.0.0.0 $port $target $port" >> "$tmp"
 done
+mv -f "$tmp" /etc/rinetd.conf
 cat > /etc/antnest-rinetd-state.conf <<STATE
 target=$target
 ports=31400-31409/tcp
@@ -196,6 +217,10 @@ main() {
   install_rinetd || exit 1
   command -v rinetd >/dev/null 2>&1 || {
     log "rinetd 未安装成功"
+    exit 1
+  }
+  command -v flock >/dev/null 2>&1 || {
+    log "flock 命令不存在，无法安全刷新 rinetd 配置"
     exit 1
   }
   install_hook || exit 1

@@ -125,16 +125,13 @@ write_server_conf() {
   local network="$4"
   local mask="$5"
   local notify=""
-  local server_proto="$proto"
   if [[ "$proto" == "udp" ]]; then
     notify="explicit-exit-notify 1"
-  elif [[ "$proto" == "tcp" ]]; then
-    server_proto="tcp-server"
   fi
 
   cat > "/etc/openvpn/server/$name.conf" <<EOF
 port $port
-proto $server_proto
+proto $proto
 dev tun
 ca ca.crt
 cert server.crt
@@ -147,6 +144,7 @@ keepalive 10 120
 cipher AES-256-GCM
 auth SHA512
 tls-crypt tc.key
+persist-key
 persist-tun
 user nobody
 group nogroup
@@ -240,27 +238,7 @@ EOF
 
 start_instance() {
   local name="$1"
-  local port="$2"
-  local service="openvpn-server@$name.service"
-
-  systemctl enable "$service" >/dev/null
-  systemctl restart "$service"
-
-  if ! systemctl is-active --quiet "$service"; then
-    log "$service failed to start"
-    systemctl status "$service" --no-pager || true
-    journalctl -u "$service" -n 80 --no-pager || true
-    exit 1
-  fi
-
-  if command -v ss >/dev/null 2>&1; then
-    if ! ss -lntup "sport = :$port" 2>/dev/null | grep -q ":$port"; then
-      log "$service started but port $port is not listening"
-      ss -lntup 2>/dev/null || true
-      journalctl -u "$service" -n 80 --no-pager || true
-      exit 1
-    fi
-  fi
+  systemctl enable --now "openvpn-server@$name.service"
 }
 
 write_client_config() {
@@ -273,6 +251,7 @@ client
 dev tun
 resolv-retry infinite
 nobind
+persist-key
 persist-tun
 remote-cert-tls server
 auth SHA512
@@ -328,19 +307,19 @@ main() {
   case "$MODE" in
     udp)
       write_server_conf "antnest-udp" "udp" "$UDP_PORT" "$VPN_NET_UDP" "$VPN_MASK_UDP"
-      start_instance "antnest-udp" "$UDP_PORT"
+      start_instance "antnest-udp"
       write_client_config "$(public_ip)" "true" "false"
       ;;
     tcp)
       write_server_conf "antnest-tcp" "tcp" "$TCP_PORT" "$VPN_NET_TCP" "$VPN_MASK_TCP"
-      start_instance "antnest-tcp" "$TCP_PORT"
+      start_instance "antnest-tcp"
       write_client_config "$(public_ip)" "false" "true"
       ;;
     dual)
       write_server_conf "antnest-udp" "udp" "$UDP_PORT" "$VPN_NET_UDP" "$VPN_MASK_UDP"
       write_server_conf "antnest-tcp" "tcp" "$TCP_PORT" "$VPN_NET_TCP" "$VPN_MASK_TCP"
-      start_instance "antnest-udp" "$UDP_PORT"
-      start_instance "antnest-tcp" "$TCP_PORT"
+      start_instance "antnest-udp"
+      start_instance "antnest-tcp"
       write_client_config "$(public_ip)" "true" "true"
       ;;
   esac

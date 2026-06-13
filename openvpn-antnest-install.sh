@@ -164,6 +164,49 @@ enable_forwarding() {
   grep -q '^net.ipv4.ip_forward=1' /etc/sysctl.conf 2>/dev/null || echo 'net.ipv4.ip_forward=1' >> /etc/sysctl.conf
 }
 
+configure_vpn_nat() {
+  cat > /etc/openvpn/server/antnest-vpn-nat.sh <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+wan_iface="$(ip -4 route show default 2>/dev/null | awk '{print $5; exit}')"
+if [[ -z "$wan_iface" ]]; then
+  echo "missing default network interface" >&2
+  exit 1
+fi
+
+sysctl -w net.ipv4.ip_forward=1 >/dev/null
+for net in 10.8.0.0/24 10.9.0.0/24; do
+  iptables -t nat -C POSTROUTING -s "$net" -o "$wan_iface" -j MASQUERADE 2>/dev/null || \
+    iptables -t nat -A POSTROUTING -s "$net" -o "$wan_iface" -j MASQUERADE
+  iptables -C FORWARD -s "$net" -j ACCEPT 2>/dev/null || \
+    iptables -A FORWARD -s "$net" -j ACCEPT
+  iptables -C FORWARD -d "$net" -j ACCEPT 2>/dev/null || \
+    iptables -A FORWARD -d "$net" -j ACCEPT
+done
+EOF
+  chmod +x /etc/openvpn/server/antnest-vpn-nat.sh
+  /etc/openvpn/server/antnest-vpn-nat.sh
+
+  if command -v systemctl >/dev/null 2>&1; then
+    cat > /etc/systemd/system/antnest-vpn-nat.service <<'EOF'
+[Unit]
+Description=AntNest OpenVPN internet NAT
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/etc/openvpn/server/antnest-vpn-nat.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    systemctl daemon-reload 2>/dev/null || true
+    systemctl enable --now antnest-vpn-nat.service 2>/dev/null || true
+  fi
+}
+
 start_instance() {
   local name="$1"
   systemctl enable --now "openvpn-server@$name.service"
@@ -230,6 +273,7 @@ main() {
   install_packages
   ensure_pki
   enable_forwarding
+  configure_vpn_nat
 
   case "$MODE" in
     udp)

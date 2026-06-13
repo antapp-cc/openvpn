@@ -14,13 +14,17 @@ install_rinetd() {
     return 0
   fi
   log "安装 rinetd"
-  apt-get update -y -o Acquire::Retries=3 --fix-missing
-  apt-get install -y rinetd
+  apt-get update || return 1
+  printf 'y\n' | apt-get install rinetd || return 1
+  if ! command -v rinetd >/dev/null 2>&1; then
+    log "rinetd 安装后仍未找到命令"
+    return 1
+  fi
 }
 
 pick_target() {
   local candidate
-  for candidate in "${ifconfig_pool_remote_ip:-}" "${ifconfig_local:-}" 10.8.0.2 10.9.0.2; do
+  for candidate in "${ifconfig_pool_remote_ip:-}" "${ifconfig_local:-}"; do
     case "$candidate" in
       10.8.0.2|10.9.0.2)
         if ping -c 1 -W 1 "$candidate" >/dev/null 2>&1; then
@@ -29,6 +33,13 @@ pick_target() {
         fi
         ;;
     esac
+  done
+  # No OpenVPN hook context: prefer TCP fallback when it is actually reachable.
+  for candidate in 10.9.0.2 10.8.0.2; do
+    if ping -c 1 -W 1 "$candidate" >/dev/null 2>&1; then
+      echo "$candidate"
+      return 0
+    fi
   done
   echo "10.8.0.2"
 }
@@ -55,10 +66,21 @@ restart_rinetd() {
   if command -v systemctl >/dev/null 2>&1; then
     systemctl restart rinetd 2>/dev/null && {
       systemctl enable rinetd >/dev/null 2>&1 || true
-      return 0
+      sleep 1
+      pgrep -x rinetd >/dev/null 2>&1 && return 0
     }
   fi
+  if ! command -v rinetd >/dev/null 2>&1; then
+    log "rinetd 命令不存在，无法启动"
+    return 1
+  fi
   nohup rinetd -c /etc/rinetd.conf >/var/log/antnest-rinetd.log 2>&1 &
+  sleep 1
+  if ! pgrep -x rinetd >/dev/null 2>&1; then
+    log "rinetd 启动失败"
+    tail -n 80 /var/log/antnest-rinetd.log 2>/dev/null || true
+    return 1
+  fi
 }
 
 verify_listen() {
@@ -81,19 +103,29 @@ install_hook() {
   cat > /etc/openvpn/server/antnest-rinetd-refresh.sh <<'EOF'
 #!/usr/bin/env bash
 set -u
-target="${ifconfig_pool_remote_ip:-}"
-case "$target" in
-  10.8.0.2|10.9.0.2) ;;
-  *)
-    if ping -c 1 -W 1 10.8.0.2 >/dev/null 2>&1; then
-      target="10.8.0.2"
-    elif ping -c 1 -W 1 10.9.0.2 >/dev/null 2>&1; then
-      target="10.9.0.2"
-    else
-      target="10.8.0.2"
+
+pick_target() {
+  local candidate
+  for candidate in "${ifconfig_pool_remote_ip:-}" "${ifconfig_local:-}"; do
+    case "$candidate" in
+      10.8.0.2|10.9.0.2)
+        echo "$candidate"
+        return 0
+        ;;
+    esac
+  done
+  # Periodic refresh has no OpenVPN hook variables. Prefer TCP when it is alive,
+  # because it is the fallback path after UDP is blocked.
+  for candidate in 10.9.0.2 10.8.0.2; do
+    if ping -c 1 -W 1 "$candidate" >/dev/null 2>&1; then
+      echo "$candidate"
+      return 0
     fi
-    ;;
-esac
+  done
+  echo "10.8.0.2"
+}
+
+target="$(pick_target)"
 
 current=""
 if [[ -f /etc/antnest-rinetd-state.conf ]]; then
@@ -119,7 +151,9 @@ pkill -x rinetd 2>/dev/null || true
 if command -v systemctl >/dev/null 2>&1 && systemctl restart rinetd 2>/dev/null; then
   systemctl enable rinetd >/dev/null 2>&1 || true
 else
-  nohup rinetd -c /etc/rinetd.conf >/var/log/antnest-rinetd.log 2>&1 &
+  if command -v rinetd >/dev/null 2>&1; then
+    nohup rinetd -c /etc/rinetd.conf >/var/log/antnest-rinetd.log 2>&1 &
+  fi
 fi
 EOF
   chmod +x /etc/openvpn/server/antnest-rinetd-refresh.sh
@@ -133,10 +167,37 @@ EOF
 
   systemctl restart openvpn-server@antnest-udp 2>/dev/null || true
   systemctl restart openvpn-server@antnest-tcp 2>/dev/null || true
+
+  cat > /etc/systemd/system/antnest-rinetd-watch.service <<'EOF'
+[Unit]
+Description=AntNest rinetd target auto refresh
+After=network-online.target rinetd.service openvpn-server@antnest-udp.service openvpn-server@antnest-tcp.service
+
+[Service]
+Type=simple
+ExecStart=/bin/bash -c 'while true; do /etc/openvpn/server/antnest-rinetd-refresh.sh >/var/log/antnest-rinetd-refresh.log 2>&1 || true; sleep 5; done'
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+  if command -v systemctl >/dev/null 2>&1; then
+    systemctl daemon-reload 2>/dev/null || true
+    systemctl enable --now antnest-rinetd-watch.service 2>/dev/null || true
+  else
+    pkill -f 'antnest-rinetd-refresh.sh.*sleep 5' 2>/dev/null || true
+    nohup bash -c 'while true; do /etc/openvpn/server/antnest-rinetd-refresh.sh >/var/log/antnest-rinetd-refresh.log 2>&1 || true; sleep 5; done' >/dev/null 2>&1 &
+  fi
 }
 
 main() {
   install_rinetd || exit 1
+  command -v rinetd >/dev/null 2>&1 || {
+    log "rinetd 未安装成功"
+    exit 1
+  }
   install_hook || exit 1
   target="$(pick_target)"
   log "当前转发目标: $target"
@@ -146,6 +207,8 @@ main() {
     log "31400-31409 已监听"
   else
     log "rinetd 已启动，但端口监听校验未全部通过"
+    ss -ltnp 2>/dev/null | grep rinetd || true
+    exit 1
   fi
   log "配置文件: /etc/rinetd.conf"
 }

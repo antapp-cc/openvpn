@@ -78,6 +78,12 @@ public_ip() {
   if [[ -z "$ip" ]]; then
     ip="$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src"){print $(i+1); exit}}')"
   fi
+  if [[ -z "$ip" ]]; then
+    ip="$(curl -4fsS --connect-timeout 10 http://ip1.dynupdate.no-ip.com/ 2>/dev/null | grep -m 1 -oE '([0-9]{1,3}\.){3}[0-9]{1,3}' || true)"
+  fi
+  if [[ -z "$ip" ]]; then
+    ip="$(wget -T 10 -qO- http://ip1.dynupdate.no-ip.com/ 2>/dev/null | grep -m 1 -oE '([0-9]{1,3}\.){3}[0-9]{1,3}' || true)"
+  fi
   echo "$ip"
 }
 
@@ -230,6 +236,11 @@ cipher AES-256-GCM
 verb 3
 connect-retry 3
 connect-timeout 8
+block-outside-dns
+register-dns
+mssfix 1360
+tun-mtu 1400
+disable-dco
 <ca>
 $(cat "$PKI_DIR/ca.crt")
 </ca>
@@ -269,29 +280,37 @@ EOF
 }
 
 main() {
+  local server_ip
+
   log "Mode: $MODE"
   install_packages
   ensure_pki
   enable_forwarding
   configure_vpn_nat
 
+  server_ip="$(public_ip)"
+  if [[ -z "$server_ip" ]]; then
+    echo "Failed to detect public IPv4 address; refusing to generate client config with empty remote." >&2
+    exit 1
+  fi
+
   case "$MODE" in
     udp)
       write_server_conf "antnest-udp" "udp" "$UDP_PORT" "$VPN_NET_UDP" "$VPN_MASK_UDP"
       start_instance "antnest-udp"
-      write_client_config "$(public_ip)" "true" "false"
+      write_client_config "$server_ip" "true" "false"
       ;;
     tcp)
       write_server_conf "antnest-tcp" "tcp" "$TCP_PORT" "$VPN_NET_TCP" "$VPN_MASK_TCP"
       start_instance "antnest-tcp"
-      write_client_config "$(public_ip)" "false" "true"
+      write_client_config "$server_ip" "false" "true"
       ;;
     dual)
       write_server_conf "antnest-udp" "udp" "$UDP_PORT" "$VPN_NET_UDP" "$VPN_MASK_UDP"
       write_server_conf "antnest-tcp" "tcp" "$TCP_PORT" "$VPN_NET_TCP" "$VPN_MASK_TCP"
       start_instance "antnest-udp"
       start_instance "antnest-tcp"
-      write_client_config "$(public_ip)" "true" "true"
+      write_client_config "$server_ip" "true" "true"
       ;;
   esac
 

@@ -2,7 +2,6 @@
 set -euo pipefail
 
 MODE="dual"
-AUTO="false"
 CLIENT_NAME="client"
 UDP_PORT="62230"
 TCP_PORT="62231"
@@ -21,7 +20,6 @@ while [[ $# -gt 0 ]]; do
       shift 2
       ;;
     --auto)
-      AUTO="true"
       shift
       ;;
     --client)
@@ -71,20 +69,59 @@ apt_retry() {
 
 public_ip() {
   local ip
+
+  is_public_ipv4() {
+    local value="$1"
+    local a b c d
+
+    [[ "$value" =~ ^([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})$ ]] || return 1
+    a="${BASH_REMATCH[1]}"
+    b="${BASH_REMATCH[2]}"
+    c="${BASH_REMATCH[3]}"
+    d="${BASH_REMATCH[4]}"
+
+    (( a >= 0 && a <= 255 && b >= 0 && b <= 255 && c >= 0 && c <= 255 && d >= 0 && d <= 255 )) || return 1
+    (( a == 0 )) && return 1
+    (( a == 10 )) && return 1
+    (( a == 172 && b >= 16 && b <= 31 )) && return 1
+    (( a == 192 && b == 168 )) && return 1
+    (( a == 127 )) && return 1
+    (( a == 169 && b == 254 )) && return 1
+    (( a == 100 && b >= 64 && b <= 127 )) && return 1
+    (( a == 192 && b == 0 && c == 2 )) && return 1
+    (( a == 198 && b == 51 && c == 100 )) && return 1
+    (( a == 203 && b == 0 && c == 113 )) && return 1
+    (( a == 198 && (b == 18 || b == 19) )) && return 1
+    (( a >= 224 )) && return 1
+
+    return 0
+  }
+
+  use_public_ip() {
+    ip="$1"
+    if is_public_ipv4 "$ip"; then
+      echo "$ip"
+      return 0
+    fi
+    return 1
+  }
+
   ip="$(curl -4fsS --connect-timeout 5 https://api.ipify.org 2>/dev/null || true)"
-  if [[ -z "$ip" ]]; then
-    ip="$(wget -T 5 -qO- https://api.ipify.org 2>/dev/null || true)"
-  fi
-  if [[ -z "$ip" ]]; then
-    ip="$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src"){print $(i+1); exit}}')"
-  fi
-  if [[ -z "$ip" ]]; then
-    ip="$(curl -4fsS --connect-timeout 10 http://ip1.dynupdate.no-ip.com/ 2>/dev/null | grep -m 1 -oE '([0-9]{1,3}\.){3}[0-9]{1,3}' || true)"
-  fi
-  if [[ -z "$ip" ]]; then
-    ip="$(wget -T 10 -qO- http://ip1.dynupdate.no-ip.com/ 2>/dev/null | grep -m 1 -oE '([0-9]{1,3}\.){3}[0-9]{1,3}' || true)"
-  fi
-  echo "$ip"
+  use_public_ip "$ip" && return 0
+
+  ip="$(wget -T 5 -qO- https://api.ipify.org 2>/dev/null || true)"
+  use_public_ip "$ip" && return 0
+
+  ip="$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src"){print $(i+1); exit}}')"
+  use_public_ip "$ip" && return 0
+
+  ip="$(curl -4fsS --connect-timeout 10 http://ip1.dynupdate.no-ip.com/ 2>/dev/null | grep -m 1 -oE '([0-9]{1,3}\.){3}[0-9]{1,3}' || true)"
+  use_public_ip "$ip" && return 0
+
+  ip="$(wget -T 10 -qO- http://ip1.dynupdate.no-ip.com/ 2>/dev/null | grep -m 1 -oE '([0-9]{1,3}\.){3}[0-9]{1,3}' || true)"
+  use_public_ip "$ip" && return 0
+
+  echo ""
 }
 
 install_packages() {
@@ -236,6 +273,7 @@ cipher AES-256-GCM
 verb 3
 connect-retry 3
 connect-timeout 8
+ignore-unknown-option block-outside-dns register-dns disable-dco
 block-outside-dns
 register-dns
 mssfix 1360

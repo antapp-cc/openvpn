@@ -187,7 +187,7 @@ keepalive 10 120
 cipher AES-256-GCM
 auth SHA512
 mssfix 1360
-tun-mtu 1400
+tun-mtu 1500
 tls-crypt tc.key
 persist-key
 persist-tun
@@ -276,12 +276,12 @@ cipher AES-256-GCM
 verb 3
 connect-retry 3
 connect-timeout 8
-ignore-unknown-option block-outside-dns register-dns disable-dco
+ignore-unknown-option block-outside-dns register-dns
 block-outside-dns
 register-dns
 mssfix 1360
-tun-mtu 1400
-disable-dco
+tun-mtu 1500
+auth-nocache
 <ca>
 $(cat "$PKI_DIR/ca.crt")
 </ca>

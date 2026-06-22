@@ -186,6 +186,8 @@ ifconfig-pool-persist ipp-$name.txt
 keepalive 10 120
 cipher AES-256-GCM
 auth SHA512
+mssfix 1360
+tun-mtu 1400
 tls-crypt tc.key
 persist-key
 persist-tun
@@ -252,7 +254,8 @@ EOF
 
 start_instance() {
   local name="$1"
-  systemctl enable --now "openvpn-server@$name.service"
+  systemctl enable "openvpn-server@$name.service"
+  systemctl restart "openvpn-server@$name.service"
 }
 
 write_client_config() {

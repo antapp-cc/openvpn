@@ -189,7 +189,6 @@ auth SHA512
 mssfix 1360
 tun-mtu 1500
 tls-crypt tc.key
-persist-key
 persist-tun
 user nobody
 group nogroup
@@ -268,7 +267,6 @@ client
 dev tun
 resolv-retry infinite
 nobind
-persist-key
 persist-tun
 remote-cert-tls server
 auth SHA512

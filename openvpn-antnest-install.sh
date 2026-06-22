@@ -183,7 +183,7 @@ dh dh.pem
 topology subnet
 server $network $mask
 ifconfig-pool-persist ipp-$name.txt
-keepalive 10 120
+keepalive 5 30
 cipher AES-256-GCM
 auth SHA512
 mssfix 1360
@@ -272,8 +272,11 @@ remote-cert-tls server
 auth SHA512
 cipher AES-256-GCM
 verb 3
-connect-retry 3
+connect-retry 3 10
 connect-timeout 8
+server-poll-timeout 10
+ping 5
+ping-restart 30
 ignore-unknown-option block-outside-dns register-dns
 block-outside-dns
 register-dns

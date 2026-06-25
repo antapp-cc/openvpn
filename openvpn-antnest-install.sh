@@ -183,7 +183,7 @@ dh dh.pem
 topology subnet
 server $network $mask
 ifconfig-pool-persist ipp-$name.txt
-keepalive 10 120
+keepalive 10 60
 cipher AES-256-GCM
 auth SHA512
 mssfix 1360

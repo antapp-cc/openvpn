@@ -2,6 +2,7 @@
 set -euo pipefail
 
 MODE="dual"
+PREFER="udp"
 CLIENT_NAME="client"
 UDP_PORT="62230"
 TCP_PORT="62231"
@@ -9,7 +10,6 @@ VPN_NET_UDP="10.8.0.0"
 VPN_MASK_UDP="255.255.255.0"
 VPN_NET_TCP="10.9.0.0"
 VPN_MASK_TCP="255.255.255.0"
-OUT_PATH="/root/client.ovpn"
 EASYRSA_DIR="/etc/openvpn/server/easy-rsa"
 PKI_DIR="$EASYRSA_DIR/pki"
 
@@ -20,6 +20,10 @@ while [[ $# -gt 0 ]]; do
       shift 2
       ;;
     --auto)
+      shift
+      ;;
+    --prefer-tcp)
+      PREFER="tcp"
       shift
       ;;
     --client)
@@ -40,6 +44,13 @@ case "$MODE" in
     exit 2
     ;;
 esac
+
+if [[ ! "$CLIENT_NAME" =~ ^[A-Za-z0-9._-]+$ ]]; then
+  echo "Invalid client name: $CLIENT_NAME. Use letters, digits, dot, dash, underscore only." >&2
+  exit 2
+fi
+
+OUT_PATH="/root/$CLIENT_NAME.ovpn"
 
 if [[ "$EUID" -ne 0 ]]; then
   echo "Please run as root." >&2
@@ -168,8 +179,11 @@ write_server_conf() {
   local network="$4"
   local mask="$5"
   local notify=""
+  local tcpopts=""
   if [[ "$proto" == "udp" ]]; then
     notify="explicit-exit-notify 1"
+  else
+    tcpopts="tcp-nodelay"
   fi
 
   cat > "/etc/openvpn/server/$name.conf" <<EOF
@@ -183,8 +197,12 @@ dh dh.pem
 topology subnet
 server $network $mask
 ifconfig-pool-persist ipp-$name.txt
-keepalive 10 60
+keepalive 5 30
+reneg-sec 0
+sndbuf 0
+rcvbuf 0
 cipher AES-256-GCM
+data-ciphers AES-256-GCM:AES-128-GCM:CHACHA20-POLY1305
 auth SHA512
 mssfix 1360
 tun-mtu 1500
@@ -194,6 +212,7 @@ persist-tun
 user nobody
 group nogroup
 status /var/log/openvpn-$name-status.log
+status-version 3
 verb 3
 crl-verify crl.pem
 script-security 2
@@ -201,12 +220,23 @@ push "redirect-gateway def1 bypass-dhcp"
 push "dhcp-option DNS 1.1.1.1"
 push "dhcp-option DNS 8.8.8.8"
 $notify
+$tcpopts
 EOF
 }
 
 enable_forwarding() {
   sysctl -w net.ipv4.ip_forward=1 >/dev/null
   grep -q '^net.ipv4.ip_forward=1' /etc/sysctl.conf 2>/dev/null || echo 'net.ipv4.ip_forward=1' >> /etc/sysctl.conf
+
+  modprobe tcp_bbr 2>/dev/null || true
+  cat > /etc/sysctl.d/99-antnest-vpn.conf <<'EOF'
+net.ipv4.ip_forward=1
+net.core.rmem_max=134217728
+net.core.wmem_max=134217728
+net.core.default_qdisc=fq
+net.ipv4.tcp_congestion_control=bbr
+EOF
+  sysctl -p /etc/sysctl.d/99-antnest-vpn.conf >/dev/null 2>&1 || true
 }
 
 configure_vpn_nat() {
@@ -221,6 +251,8 @@ if [[ -z "$wan_iface" ]]; then
 fi
 
 sysctl -w net.ipv4.ip_forward=1 >/dev/null
+iptables -C INPUT -p udp --dport 62230 -j ACCEPT 2>/dev/null || iptables -I INPUT -p udp --dport 62230 -j ACCEPT
+iptables -C INPUT -p tcp --dport 62231 -j ACCEPT 2>/dev/null || iptables -I INPUT -p tcp --dport 62231 -j ACCEPT
 for net in 10.8.0.0/24 10.9.0.0/24; do
   iptables -t nat -C POSTROUTING -s "$net" -o "$wan_iface" -j MASQUERADE 2>/dev/null || \
     iptables -t nat -A POSTROUTING -s "$net" -o "$wan_iface" -j MASQUERADE
@@ -237,6 +269,7 @@ EOF
     cat > /etc/systemd/system/antnest-vpn-nat.service <<'EOF'
 [Unit]
 Description=AntNest OpenVPN internet NAT
+Wants=network-online.target
 After=network-online.target
 
 [Service]
@@ -250,6 +283,27 @@ EOF
     systemctl daemon-reload 2>/dev/null || true
     systemctl enable --now antnest-vpn-nat.service 2>/dev/null || true
   fi
+}
+
+install_status_helper() {
+  cat > /usr/local/bin/antnest-status <<'EOF'
+#!/usr/bin/env bash
+for s in antnest-udp antnest-tcp; do
+  log="/var/log/openvpn-$s-status.log"
+  state="$(systemctl is-active "openvpn-server@$s.service" 2>/dev/null || echo unknown)"
+  if [[ "$state" != "active" ]]; then
+    continue
+  fi
+  rows="$(sed -n '/^CLIENT LIST/,/^ROUTING TABLE/p' "$log" 2>/dev/null | grep -vE '^(CLIENT LIST|ROUTING TABLE|Updated)' | grep -v '^$' || true)"
+  echo "== $s (running) =="
+  if [[ -n "$rows" ]]; then
+    echo "$rows"
+  else
+    echo "  no clients connected"
+  fi
+done
+EOF
+  chmod +x /usr/local/bin/antnest-status
 }
 
 start_instance() {
@@ -276,11 +330,14 @@ verb 3
 connect-retry 3 10
 connect-timeout 8
 server-poll-timeout 10
-ping 5
-ping-restart 30
-ignore-unknown-option block-outside-dns register-dns
+reneg-sec 0
+sndbuf 0
+rcvbuf 0
+socket-flags TCP_NODELAY
+ignore-unknown-option block-outside-dns register-dns block-ipv6
 block-outside-dns
 register-dns
+block-ipv6
 mssfix 1360
 tun-mtu 1500
 auth-nocache
@@ -298,25 +355,32 @@ $(cat "$PKI_DIR/tc.key")
 </tls-crypt>
 EOF
 
-  if [[ "$include_udp" == "true" ]]; then
-    cat >> "$OUT_PATH" <<EOF
+  local proto_order=("udp" "tcp")
+  if [[ "$PREFER" == "tcp" ]]; then
+    proto_order=("tcp" "udp")
+  fi
+
+  for p in "${proto_order[@]}"; do
+    if [[ "$p" == "udp" && "$include_udp" == "true" ]]; then
+      cat >> "$OUT_PATH" <<EOF
 
 <connection>
 remote $server_ip $UDP_PORT
 proto udp
+explicit-exit-notify 1
 </connection>
 EOF
-  fi
-
-  if [[ "$include_tcp" == "true" ]]; then
-    cat >> "$OUT_PATH" <<EOF
+    fi
+    if [[ "$p" == "tcp" && "$include_tcp" == "true" ]]; then
+      cat >> "$OUT_PATH" <<EOF
 
 <connection>
 remote $server_ip $TCP_PORT
 proto tcp-client
 </connection>
 EOF
-  fi
+    fi
+  done
 
   chmod 600 "$OUT_PATH"
   log "Client config available at $OUT_PATH"
@@ -330,6 +394,7 @@ main() {
   ensure_pki
   enable_forwarding
   configure_vpn_nat
+  install_status_helper
 
   server_ip="$(public_ip)"
   if [[ -z "$server_ip" ]]; then
@@ -357,6 +422,17 @@ main() {
       ;;
   esac
 
+  log "----------------------------------------"
+  log "Server IP : $server_ip"
+  case "$MODE" in
+    udp)  log "Endpoint  : udp $server_ip $UDP_PORT" ;;
+    tcp)  log "Endpoint  : tcp $server_ip $TCP_PORT" ;;
+    dual) log "Endpoints : udp $server_ip $UDP_PORT (preferred) / tcp $server_ip $TCP_PORT (fallback)" ;;
+  esac
+  log "Client cfg: $OUT_PATH"
+  log "More devices: bash $0 --client <name>   (one config per device)"
+  log "Prefer TCP   : bash $0 --client <name> --prefer-tcp"
+  log "Who is online: run 'antnest-status' on the server"
   log "OpenVPN install complete"
 }
 

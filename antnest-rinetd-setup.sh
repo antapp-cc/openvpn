@@ -4,35 +4,111 @@ set -u
 export DEBIAN_FRONTEND=noninteractive
 export NEEDRESTART_MODE=a
 
+NODE_CLIENT="client"
+PORT_START="31400"
+PORT_END="31409"
+CHAIN="ANTNEST_NODE"
+REFRESH_SH="/etc/openvpn/server/antnest-rinetd-refresh.sh"
+PORTS_SH="/etc/openvpn/server/antnest-rinetd-ports.sh"
+STATE_CONF="/etc/antnest-rinetd-state.conf"
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --client)
+      NODE_CLIENT="${2:-client}"
+      shift 2
+      ;;
+    *)
+      echo "Unknown argument: $1" >&2
+      exit 2
+      ;;
+  esac
+done
+
+if [[ ! "$NODE_CLIENT" =~ ^[A-Za-z0-9._-]+$ ]]; then
+  echo "Invalid client name: $NODE_CLIENT" >&2
+  exit 2
+fi
+
 log() {
-  echo "[antnest-rinetd] $*"
+  echo "[antnest-node-fwd] $*"
 }
 
-install_rinetd() {
-  if command -v rinetd >/dev/null 2>&1; then
-    log "rinetd 已安装"
-    return 0
+port_range() {
+  echo "${PORT_START}:${PORT_END}"
+}
+
+install_deps() {
+  if ! command -v iptables >/dev/null 2>&1; then
+    log "安装 iptables"
+    apt-get update -y || return 1
+    apt-get install -y iptables || return 1
   fi
-  log "安装 rinetd"
-  apt-get update || return 1
-  printf 'y\n' | apt-get install rinetd || return 1
-  if ! command -v rinetd >/dev/null 2>&1; then
-    log "rinetd 安装后仍未找到命令"
+  command -v flock >/dev/null 2>&1 || {
+    log "flock 命令不存在，无法安全刷新规则"
     return 1
+  }
+  return 0
+}
+
+retire_rinetd() {
+  # 用户态 rinetd 机制退役，避免和 DNAT 抢同一批端口
+  if command -v systemctl >/dev/null 2>&1; then
+    systemctl stop rinetd.service 2>/dev/null || true
+    systemctl disable rinetd.service 2>/dev/null || true
   fi
+  pkill -x rinetd 2>/dev/null || true
+}
+
+retire_hook() {
+  local conf name
+  for conf in /etc/openvpn/server/antnest-udp.conf /etc/openvpn/server/antnest-tcp.conf; do
+    [[ -f "$conf" ]] || continue
+    if grep -q '^client-connect ' "$conf"; then
+      sed -i '/^client-connect /d' "$conf"
+      name="$(basename "$conf" .conf)"
+      systemctl restart "openvpn-server@$name" 2>/dev/null || true
+      log "已移除 $conf 中的 client-connect 钩子并重启 openvpn-server@$name"
+    fi
+  done
+}
+
+nat_ensure_jump() {
+  iptables -t nat -N "$CHAIN" 2>/dev/null || true
+  if ! iptables -t nat -C PREROUTING -p tcp --dport "$(port_range)" -j "$CHAIN" 2>/dev/null; then
+    iptables -t nat -I PREROUTING -p tcp --dport "$(port_range)" -j "$CHAIN"
+  fi
+  if ! iptables -t nat -C PREROUTING -p udp --dport "$(port_range)" -j "$CHAIN" 2>/dev/null; then
+    iptables -t nat -I PREROUTING -p udp --dport "$(port_range)" -j "$CHAIN"
+  fi
+}
+
+nat_set_target() {
+  local target="$1"
+  iptables -t nat -F "$CHAIN"
+  iptables -t nat -A "$CHAIN" -p tcp --dport "$(port_range)" -j DNAT --to-destination "$target"
+  iptables -t nat -A "$CHAIN" -p udp --dport "$(port_range)" -j DNAT --to-destination "$target"
+}
+
+nat_target_ok() {
+  local target="$1" rules
+  iptables -t nat -C PREROUTING -p tcp --dport "$(port_range)" -j "$CHAIN" 2>/dev/null || return 1
+  iptables -t nat -C PREROUTING -p udp --dport "$(port_range)" -j "$CHAIN" 2>/dev/null || return 1
+  rules="$(iptables -t nat -S "$CHAIN" 2>/dev/null | grep -- '-j DNAT' || true)"
+  [[ "$(printf '%s\n' "$rules" | grep -c -- "--to-destination ${target}\$")" -eq 2 ]] || return 1
+  [[ "$(printf '%s\n' "$rules" | grep -c .)" -eq 2 ]] || return 1
+  return 0
 }
 
 pick_target() {
-  local candidate
-  for candidate in "${ifconfig_pool_remote_ip:-}" "${ifconfig_local:-}"; do
-    case "$candidate" in
-      10.8.0.2|10.9.0.2)
-        if ping -c 1 -W 1 "$candidate" >/dev/null 2>&1; then
-          echo "$candidate"
-          return 0
-        fi
-        ;;
-    esac
+  local status_file candidate
+  for status_file in /var/log/openvpn-antnest-udp-status.log /var/log/openvpn-antnest-tcp-status.log; do
+    [[ -f "$status_file" ]] || continue
+    candidate="$(awk -F, -v cn="$NODE_CLIENT" '$1==cn && $2 ~ /^10\.(8|9)\.0\.[0-9]+$/ {print $2; exit}' "$status_file" 2>/dev/null || true)"
+    if [[ -n "$candidate" ]]; then
+      echo "$candidate"
+      return 0
+    fi
   done
   for status_file in /var/log/openvpn-antnest-tcp-status.log /var/log/openvpn-antnest-udp-status.log; do
     if [[ -f "$status_file" ]]; then
@@ -48,63 +124,56 @@ pick_target() {
   echo "10.8.0.2"
 }
 
-write_conf() {
-  local target="$1"
-  local tmp="/tmp/antnest-rinetd.conf.$$"
-  cat > "$tmp" <<EOF
-# AntNest Pi Node port forwarding
-# Auto-generated. 31400-31409 -> current OpenVPN client.
-EOF
-  local port
-  for port in $(seq 31400 31409); do
-    echo "0.0.0.0 $port $target $port" >> "$tmp"
-  done
-  mv -f "$tmp" /etc/rinetd.conf
-  cat > /etc/antnest-rinetd-state.conf <<EOF
-target=$target
-ports=31400-31409/tcp
-updated_at=$(date -Is)
-EOF
-}
+write_ports_boot() {
+  mkdir -p /etc/openvpn/server
+  cat > "$PORTS_SH" <<'BOOTEOF'
+#!/usr/bin/env bash
+set -u
+CHAIN=ANTNEST_NODE
+STATE=/etc/antnest-rinetd-state.conf
 
-restart_rinetd() {
-  pkill -x rinetd 2>/dev/null || true
+for port in $(seq 31400 31409); do
+  iptables -C INPUT -p tcp --dport "$port" -j ACCEPT 2>/dev/null || iptables -I INPUT -p tcp --dport "$port" -j ACCEPT
+done
+
+target="$(sed -n 's/^target=//p' "$STATE" 2>/dev/null | head -n1)"
+[[ -z "$target" ]] && target="10.8.0.2"
+
+iptables -t nat -N "$CHAIN" 2>/dev/null || true
+if ! iptables -t nat -C PREROUTING -p tcp --dport 31400:31409 -j "$CHAIN" 2>/dev/null; then
+  iptables -t nat -I PREROUTING -p tcp --dport 31400:31409 -j "$CHAIN"
+fi
+if ! iptables -t nat -C PREROUTING -p udp --dport 31400:31409 -j "$CHAIN" 2>/dev/null; then
+  iptables -t nat -I PREROUTING -p udp --dport 31400:31409 -j "$CHAIN"
+fi
+iptables -t nat -F "$CHAIN"
+iptables -t nat -A "$CHAIN" -p tcp --dport 31400:31409 -j DNAT --to-destination "$target"
+iptables -t nat -A "$CHAIN" -p udp --dport 31400:31409 -j DNAT --to-destination "$target"
+BOOTEOF
+  chmod +x "$PORTS_SH"
+  "$PORTS_SH" || true
+
   if command -v systemctl >/dev/null 2>&1; then
-    systemctl restart rinetd 2>/dev/null && {
-      systemctl enable rinetd >/dev/null 2>&1 || true
-      sleep 1
-      pgrep -x rinetd >/dev/null 2>&1 && return 0
-    }
-  fi
-  if ! command -v rinetd >/dev/null 2>&1; then
-    log "rinetd 命令不存在，无法启动"
-    return 1
-  fi
-  nohup rinetd -c /etc/rinetd.conf >/var/log/antnest-rinetd.log 2>&1 &
-  sleep 1
-  if ! pgrep -x rinetd >/dev/null 2>&1; then
-    log "rinetd 启动失败"
-    tail -n 80 /var/log/antnest-rinetd.log 2>/dev/null || true
-    return 1
+    cat > /etc/systemd/system/antnest-rinetd-ports.service <<'UNITEOF'
+[Unit]
+Description=AntNest node DNAT ports (31400-31409)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/etc/openvpn/server/antnest-rinetd-ports.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+UNITEOF
+    systemctl daemon-reload 2>/dev/null || true
+    systemctl enable --now antnest-rinetd-ports.service 2>/dev/null || true
   fi
 }
 
-verify_listen() {
-  local missing=""
-  local port
-  for port in $(seq 31400 31409); do
-    if ! ss -ltn "sport = :$port" 2>/dev/null | grep -q ":$port"; then
-      missing="$missing $port"
-    fi
-  done
-  if [[ -n "$missing" ]]; then
-    log "未监听端口:$missing"
-    return 1
-  fi
-  return 0
-}
-
-install_hook() {
+install_watch() {
   mkdir -p /etc/openvpn/server
   if command -v systemctl >/dev/null 2>&1; then
     systemctl stop antnest-rinetd-watch.service 2>/dev/null || true
@@ -112,23 +181,57 @@ install_hook() {
   fi
   pkill -f 'antnest-rinetd-refresh.sh.*sleep 5' 2>/dev/null || true
 
-  cat > /etc/openvpn/server/antnest-rinetd-refresh.sh <<'EOF'
+  if [[ -f "$STATE_CONF" ]] && grep -q '^client=' "$STATE_CONF"; then
+    sed -i "s/^client=.*/client=$NODE_CLIENT/" "$STATE_CONF"
+  else
+    echo "client=$NODE_CLIENT" >> "$STATE_CONF"
+  fi
+
+  cat > "$REFRESH_SH" <<'EOF'
 #!/usr/bin/env bash
 set -u
-exec 9>/run/antnest-rinetd-refresh.lock
+if [[ "$(id -u)" -ne 0 ]]; then
+  exit 0
+fi
+exec 9>/run/antnest-node-refresh.lock
 if ! flock -n 9; then
   exit 0
 fi
 
+CHAIN="ANTNEST_NODE"
+STATE="/etc/antnest-rinetd-state.conf"
+
+port_range() { echo "31400:31409"; }
+
+nat_ensure_jump() {
+  iptables -t nat -N "$CHAIN" 2>/dev/null || true
+  if ! iptables -t nat -C PREROUTING -p tcp --dport "$(port_range)" -j "$CHAIN" 2>/dev/null; then
+    iptables -t nat -I PREROUTING -p tcp --dport "$(port_range)" -j "$CHAIN"
+  fi
+  if ! iptables -t nat -C PREROUTING -p udp --dport "$(port_range)" -j "$CHAIN" 2>/dev/null; then
+    iptables -t nat -I PREROUTING -p udp --dport "$(port_range)" -j "$CHAIN"
+  fi
+}
+
+nat_target_ok() {
+  local target="$1" rules
+  iptables -t nat -C PREROUTING -p tcp --dport "$(port_range)" -j "$CHAIN" 2>/dev/null || return 1
+  iptables -t nat -C PREROUTING -p udp --dport "$(port_range)" -j "$CHAIN" 2>/dev/null || return 1
+  rules="$(iptables -t nat -S "$CHAIN" 2>/dev/null | grep -- '-j DNAT' || true)"
+  [[ "$(printf '%s\n' "$rules" | grep -c -- "--to-destination ${target}\$")" -eq 2 ]] || return 1
+  [[ "$(printf '%s\n' "$rules" | grep -c .)" -eq 2 ]] || return 1
+  return 0
+}
+
 pick_target() {
-  local candidate
-  for candidate in "${ifconfig_pool_remote_ip:-}" "${ifconfig_local:-}"; do
-    case "$candidate" in
-      10.8.0.2|10.9.0.2)
-        echo "$candidate"
-        return 0
-        ;;
-    esac
+  local status_file candidate
+  for status_file in /var/log/openvpn-antnest-udp-status.log /var/log/openvpn-antnest-tcp-status.log; do
+    [[ -f "$status_file" ]] || continue
+    candidate="$(awk -F, -v cn="$node_client" '$1==cn && $2 ~ /^10\.(8|9)\.0\.[0-9]+$/ {print $2; exit}' "$status_file" 2>/dev/null || true)"
+    if [[ -n "$candidate" ]]; then
+      echo "$candidate"
+      return 0
+    fi
   done
   for status_file in /var/log/openvpn-antnest-tcp-status.log /var/log/openvpn-antnest-udp-status.log; do
     if [[ -f "$status_file" ]]; then
@@ -144,55 +247,34 @@ pick_target() {
   echo "10.8.0.2"
 }
 
-target="$(pick_target)"
+node_client="$(sed -n 's/^client=//p' "$STATE" 2>/dev/null | head -n1)"
+[[ -z "$node_client" ]] && node_client="client"
 
-current=""
-if [[ -f /etc/antnest-rinetd-state.conf ]]; then
-  current="$(sed -n 's/^target=//p' /etc/antnest-rinetd-state.conf | head -n1)"
-fi
-if [[ "$current" == "$target" ]] && pgrep -x rinetd >/dev/null 2>&1; then
+target="$(pick_target)"
+current="$(sed -n 's/^target=//p' "$STATE" 2>/dev/null | head -n1)"
+
+if [[ "$current" == "$target" ]] && nat_ensure_jump && nat_target_ok "$target"; then
   exit 0
 fi
 
-tmp="/tmp/antnest-rinetd.conf.$$"
-cat > "$tmp" <<CONF
-# AntNest Pi Node port forwarding
-# Auto-generated. 31400-31409 -> current OpenVPN client.
-CONF
-for port in $(seq 31400 31409); do
-  echo "0.0.0.0 $port $target $port" >> "$tmp"
-done
-mv -f "$tmp" /etc/rinetd.conf
-cat > /etc/antnest-rinetd-state.conf <<STATE
+nat_ensure_jump
+iptables -t nat -F "$CHAIN"
+iptables -t nat -A "$CHAIN" -p tcp --dport "$(port_range)" -j DNAT --to-destination "$target"
+iptables -t nat -A "$CHAIN" -p udp --dport "$(port_range)" -j DNAT --to-destination "$target"
+cat > "$STATE" <<STATE
 target=$target
-ports=31400-31409/tcp
+client=$node_client
+ports=31400-31409/tcp+udp
 updated_at=$(date -Is)
 STATE
-pkill -x rinetd 2>/dev/null || true
-if command -v systemctl >/dev/null 2>&1 && systemctl restart rinetd 2>/dev/null; then
-  systemctl enable rinetd >/dev/null 2>&1 || true
-else
-  if command -v rinetd >/dev/null 2>&1; then
-    nohup rinetd -c /etc/rinetd.conf >/var/log/antnest-rinetd.log 2>&1 &
-  fi
-fi
+logger -t antnest-node-fwd "DNAT target -> $target (client: $node_client)" 2>/dev/null || true
 EOF
-  chmod +x /etc/openvpn/server/antnest-rinetd-refresh.sh
-
-  for conf in /etc/openvpn/server/antnest-udp.conf /etc/openvpn/server/antnest-tcp.conf; do
-    [[ -f "$conf" ]] || continue
-    sed -i '/^client-connect /d' "$conf"
-    grep -q '^script-security ' "$conf" || echo 'script-security 2' >> "$conf"
-    echo 'client-connect /etc/openvpn/server/antnest-rinetd-refresh.sh' >> "$conf"
-  done
-
-  systemctl restart openvpn-server@antnest-udp 2>/dev/null || true
-  systemctl restart openvpn-server@antnest-tcp 2>/dev/null || true
+  chmod +x "$REFRESH_SH"
 
   cat > /etc/systemd/system/antnest-rinetd-watch.service <<'EOF'
 [Unit]
-Description=AntNest rinetd target auto refresh
-After=network-online.target rinetd.service openvpn-server@antnest-udp.service openvpn-server@antnest-tcp.service
+Description=AntNest node DNAT target auto refresh
+After=network-online.target openvpn-server@antnest-udp.service openvpn-server@antnest-tcp.service
 
 [Service]
 Type=simple
@@ -214,28 +296,30 @@ EOF
 }
 
 main() {
-  install_rinetd || exit 1
-  command -v rinetd >/dev/null 2>&1 || {
-    log "rinetd 未安装成功"
-    exit 1
-  }
-  command -v flock >/dev/null 2>&1 || {
-    log "flock 命令不存在，无法安全刷新 rinetd 配置"
-    exit 1
-  }
-  install_hook || exit 1
+  install_deps || exit 1
+  retire_rinetd
+  retire_hook
+  write_ports_boot
+  install_watch || exit 1
+
   target="$(pick_target)"
-  log "当前转发目标: $target"
-  write_conf "$target" || exit 1
-  restart_rinetd || exit 1
-  if verify_listen; then
-    log "31400-31409 已监听"
+  nat_ensure_jump
+  nat_set_target "$target"
+  cat > "$STATE_CONF" <<EOF
+target=$target
+client=$NODE_CLIENT
+ports=31400-31409/tcp+udp
+updated_at=$(date -Is)
+EOF
+
+  if nat_target_ok "$target"; then
+    log "DNAT 转发就绪: 31400-31409(tcp+udp) -> $target"
   else
-    log "rinetd 已启动，但端口监听校验未全部通过"
-    ss -ltnp 2>/dev/null | grep rinetd || true
+    log "DNAT 规则校验未通过，请检查内核 iptables NAT 支持"
     exit 1
   fi
-  log "配置文件: /etc/rinetd.conf"
+  log "跟随设备(证书名): $NODE_CLIENT"
+  log "查看规则: iptables -t nat -S ANTNEST_NODE"
 }
 
 main

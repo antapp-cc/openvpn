@@ -36,6 +36,10 @@ if [ -f "$LIST_DIR/debian.sources" ]; then
   echo "已停用 debian.sources (官方源改由 sources.list 提供, 原文件已备份)"
 fi
 
+# Debian 11 已进入 LTS, bullseye-security 的 Release 文件更新频率低、会周期性过期,
+# 导致 apt-get update 报 "Release file ... is expired"。关闭有效期检查(GPG 签名校验仍生效)。
+echo 'Acquire::Check-Valid-Until "false";' > /etc/apt/apt.conf.d/99-antnest-apt.conf
+
 apt-get clean
 
 # 3) 第一次尝试: 仅官方源更新

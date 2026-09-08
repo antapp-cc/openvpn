@@ -35,6 +35,8 @@ log() {
 }
 
 install_deps() {
+  # LTS 套件的 Release 文件会周期性过期, 关闭有效期检查(GPG 签名校验仍生效)
+  echo 'Acquire::Check-Valid-Until "false";' > /etc/apt/apt.conf.d/99-antnest-apt.conf 2>/dev/null || true
   if ! command -v rinetd >/dev/null 2>&1; then
     log "安装 rinetd"
     apt-get install -y rinetd || {

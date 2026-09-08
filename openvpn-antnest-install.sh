@@ -137,6 +137,8 @@ public_ip() {
 
 install_packages() {
   log "Installing OpenVPN dependencies"
+  # LTS 套件的 Release 文件会周期性过期, 关闭有效期检查(GPG 签名校验仍生效)
+  echo 'Acquire::Check-Valid-Until "false";' > /etc/apt/apt.conf.d/99-antnest-apt.conf 2>/dev/null || true
   apt_retry "Updating apt package index" apt-get update -y -o Acquire::Retries=3 --fix-missing
   apt_retry "Installing OpenVPN dependencies" apt-get install -y -o Acquire::Retries=3 --fix-missing openvpn easy-rsa iptables curl ca-certificates
 }

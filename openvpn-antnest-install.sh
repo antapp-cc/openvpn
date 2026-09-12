@@ -72,8 +72,19 @@ apt_retry() {
     return 0
   fi
 
-  log "$description failed, cleaning apt cache and retrying"
+  # 第一次重试: 清缓存+清索引列表, 强制重新拉取 Packages 索引
+  # (LTS 安全源常见故障: 索引引用的 .deb 版本已被镜像替换成新版, 旧索引 404)
+  log "$description failed, cleaning apt cache and lists, then retrying"
   apt-get clean
+  rm -rf /var/lib/apt/lists/*
+  apt-get update -y -o Acquire::Retries=3 --fix-missing
+  if "$@"; then
+    return 0
+  fi
+
+  # 第二次重试: 短暂等待后再刷一次 (镜像 CDN 各节点同步中的情况)
+  log "$description failed again, waiting and retrying once more"
+  sleep 8
   apt-get update -y -o Acquire::Retries=3 --fix-missing
   "$@"
 }
@@ -137,7 +148,6 @@ public_ip() {
 
 install_packages() {
   log "Installing OpenVPN dependencies"
-  # LTS 套件的 Release 文件会周期性过期, 关闭有效期检查(GPG 签名校验仍生效)
   echo 'Acquire::Check-Valid-Until "false";' > /etc/apt/apt.conf.d/99-antnest-apt.conf 2>/dev/null || true
   apt_retry "Updating apt package index" apt-get update -y -o Acquire::Retries=3 --fix-missing
   apt_retry "Installing OpenVPN dependencies" apt-get install -y -o Acquire::Retries=3 --fix-missing openvpn easy-rsa iptables curl ca-certificates

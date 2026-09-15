@@ -13,6 +13,15 @@ VPN_MASK_TCP="255.255.255.0"
 EASYRSA_DIR="/etc/openvpn/server/easy-rsa"
 PKI_DIR="$EASYRSA_DIR/pki"
 
+DH_PEM='-----BEGIN DH PARAMETERS-----
+MIIBCAKCAQEA//////////+t+FRYortKmq/cViAnPTzx2LnFg84tNpWp4TZBFGQz
++8yTnc4kmz75fS/jY2MMddj2gbICrsRhetPfHtXV/WVhJDP1H18GbtCFY2VVPe0a
+87VXE15/V8k1mE8McODmi3fipona8+/och3xWKE2rec1MKzKT0g6eXq8CrGCsyT7
+YdEIqUuyyOP7uWrat2DX9GgdT0Kj3jlN9K5W7edjcrsZCwenyO4KbXCeAvzhzffi
+7MA0BM0oNC9hkXL+nOmFg/+OTxIy7vKBg8P+OxtMb61zO7X8vC7CIAXFjvGDfRaD
+ssbzSibBsu/6iGtCOGEoXJf//////////wIBAg==
+-----END DH PARAMETERS-----'
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --mode)
@@ -72,8 +81,6 @@ apt_retry() {
     return 0
   fi
 
-  # 第一次重试: 清缓存+清索引列表, 强制重新拉取 Packages 索引
-  # (LTS 安全源常见故障: 索引引用的 .deb 版本已被镜像替换成新版, 旧索引 404)
   log "$description failed, cleaning apt cache and lists, then retrying"
   apt-get clean
   rm -rf /var/lib/apt/lists/*
@@ -82,7 +89,6 @@ apt_retry() {
     return 0
   fi
 
-  # 第二次重试: 短暂等待后再刷一次 (镜像 CDN 各节点同步中的情况)
   log "$description failed again, waiting and retrying once more"
   sleep 8
   apt-get update -y -o Acquire::Retries=3 --fix-missing
@@ -163,7 +169,6 @@ ensure_pki() {
   if [[ ! -d "$PKI_DIR" ]]; then
     ./easyrsa --batch init-pki
     EASYRSA_REQ_CN="antnest-ca" ./easyrsa --batch build-ca nopass
-    ./easyrsa --batch gen-dh
     openvpn --genkey secret "$PKI_DIR/tc.key"
     EASYRSA_CERT_EXPIRE=3650 ./easyrsa --batch build-server-full server nopass
     EASYRSA_CERT_EXPIRE=3650 ./easyrsa --batch build-client-full "$CLIENT_NAME" nopass
@@ -173,6 +178,13 @@ ensure_pki() {
       EASYRSA_CERT_EXPIRE=3650 ./easyrsa --batch build-client-full "$CLIENT_NAME" nopass
     fi
     EASYRSA_CRL_DAYS=3650 ./easyrsa --batch gen-crl
+  fi
+
+  if [[ ! -s "$PKI_DIR/dh.pem" ]] \
+     || ! grep -q '^-----BEGIN DH PARAMETERS-----$' "$PKI_DIR/dh.pem" 2>/dev/null \
+     || ! grep -q '^-----END DH PARAMETERS-----$' "$PKI_DIR/dh.pem" 2>/dev/null \
+     || ! openssl dhparam -in "$PKI_DIR/dh.pem" -check -noout >/dev/null 2>&1; then
+    printf '%s\n' "$DH_PEM" > "$PKI_DIR/dh.pem"
   fi
 
   cp "$PKI_DIR/ca.crt" /etc/openvpn/server/ca.crt

@@ -89,21 +89,21 @@ pick_target() {
   local status_file candidate
   for status_file in /var/log/openvpn-antnest-udp-status.log /var/log/openvpn-antnest-tcp-status.log; do
     [[ -f "$status_file" ]] || continue
-    candidate="$(awk -F, -v cn="$NODE_CLIENT" '$1==cn && $2 ~ /^10\.(8|9)\.0\.[0-9]+$/ {print $2; exit}' "$status_file" 2>/dev/null || true)"
+    # 主解析: status-version 3（TAB 分隔, 字段1=CLIENT_LIST, 字段2=证书名, 字段4=虚拟地址）
+    candidate="$(awk -F'\t' -v cn="$NODE_CLIENT" \
+      '$1=="CLIENT_LIST" && $2==cn && $4 ~ /^10\.(8|9)\.0\.[0-9]+$/ {print $4; exit}' \
+      "$status_file" 2>/dev/null || true)"
     if [[ -n "$candidate" ]]; then
       echo "$candidate"
       return 0
     fi
-  done
-  for status_file in /var/log/openvpn-antnest-tcp-status.log /var/log/openvpn-antnest-udp-status.log; do
-    if [[ -f "$status_file" ]]; then
-      candidate="$(grep -oE '10\.(8|9)\.0\.2' "$status_file" 2>/dev/null | head -n1 || true)"
-      case "$candidate" in
-        10.8.0.2|10.9.0.2)
-          echo "$candidate"
-          return 0
-          ;;
-      esac
+    # v1 的虚拟地址在 ROUTING TABLE 段，且可能带 C(cached) 标志，所以先剥掉尾字母。
+    candidate="$(awk -F, -v cn="$NODE_CLIENT" \
+      '$2==cn && $1 ~ /^10\.(8|9)\.0\.[0-9]+[A-Z]?$/ {sub(/[A-Z]+$/,"",$1); print $1; exit}' \
+      "$status_file" 2>/dev/null || true)"
+    if [[ -n "$candidate" ]]; then
+      echo "$candidate"
+      return 0
     fi
   done
   echo "10.8.0.2"
@@ -239,21 +239,21 @@ pick_target() {
   local status_file candidate
   for status_file in /var/log/openvpn-antnest-udp-status.log /var/log/openvpn-antnest-tcp-status.log; do
     [[ -f "$status_file" ]] || continue
-    candidate="$(awk -F, -v cn="$node_client" '$1==cn && $2 ~ /^10\.(8|9)\.0\.[0-9]+$/ {print $2; exit}' "$status_file" 2>/dev/null || true)"
+    # status-version 3: TAB 分隔, 字段1=CLIENT_LIST, 字段2=证书名, 字段4=虚拟地址
+    candidate="$(awk -F'\t' -v cn="$node_client" \
+      '$1=="CLIENT_LIST" && $2==cn && $4 ~ /^10\.(8|9)\.0\.[0-9]+$/ {print $4; exit}' \
+      "$status_file" 2>/dev/null || true)"
     if [[ -n "$candidate" ]]; then
       echo "$candidate"
       return 0
     fi
-  done
-  for status_file in /var/log/openvpn-antnest-tcp-status.log /var/log/openvpn-antnest-udp-status.log; do
-    if [[ -f "$status_file" ]]; then
-      candidate="$(grep -oE '10\.(8|9)\.0\.2' "$status_file" 2>/dev/null | head -n1 || true)"
-      case "$candidate" in
-        10.8.0.2|10.9.0.2)
-          echo "$candidate"
-          return 0
-          ;;
-      esac
+    # 兜底: status-version 被改回 1/2 的情况（逗号分隔 + ROUTING TABLE 段）
+    candidate="$(awk -F, -v cn="$node_client" \
+      '$2==cn && $1 ~ /^10\.(8|9)\.0\.[0-9]+[A-Z]?$/ {sub(/[A-Z]+$/,"",$1); print $1; exit}' \
+      "$status_file" 2>/dev/null || true)"
+    if [[ -n "$candidate" ]]; then
+      echo "$candidate"
+      return 0
     fi
   done
   echo "10.8.0.2"

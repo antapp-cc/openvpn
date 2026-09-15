@@ -12,6 +12,20 @@ PORTS_SH="/etc/openvpn/server/antnest-rinetd-ports.sh"
 STATE_CONF="/etc/antnest-rinetd-state.conf"
 RINETD_CONF="/etc/rinetd.conf"
 
+# ---------- 客户端还没连上时先转发到哪 ----------
+
+default_target() {
+  local udp_conf="/etc/openvpn/server/antnest-udp.conf"
+  local tcp_conf="/etc/openvpn/server/antnest-tcp.conf"
+  if [[ -f "$udp_conf" ]]; then
+    echo "10.8.0.2"        # 有 UDP 实例（dual 模式）→ UDP 池优先，和客户端主用通道一致
+  elif [[ -f "$tcp_conf" ]]; then
+    echo "10.9.0.2"        # 只有 TCP 实例 → 只能用 TCP 池
+  else
+    echo "10.8.0.2"        # 两个都没有（OpenVPN 还没装）→ 维持老行为
+  fi
+}
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --client)
@@ -106,7 +120,7 @@ pick_target() {
       return 0
     fi
   done
-  echo "10.8.0.2"
+  default_target
 }
 
 # ---------- rinetd 管理 ----------
@@ -151,12 +165,22 @@ set -u
 STATE=/etc/antnest-rinetd-state.conf
 CONF=/etc/rinetd.conf
 
+default_target() {
+  if [[ -f /etc/openvpn/server/antnest-udp.conf ]]; then
+    echo "10.8.0.2"
+  elif [[ -f /etc/openvpn/server/antnest-tcp.conf ]]; then
+    echo "10.9.0.2"
+  else
+    echo "10.8.0.2"
+  fi
+}
+
 for port in $(seq 31400 31409); do
   iptables -C INPUT -p tcp --dport "$port" -j ACCEPT 2>/dev/null || iptables -I INPUT -p tcp --dport "$port" -j ACCEPT
 done
 
 target="$(sed -n 's/^target=//p' "$STATE" 2>/dev/null | head -n1)"
-[[ -z "$target" ]] && target="10.8.0.2"
+[[ -z "$target" ]] && target="$(default_target)"
 
 tmp="/tmp/rinetd.boot.$$"
 echo "# AntNest Pi Node port forwarding (auto-generated)" > "$tmp"
@@ -173,7 +197,6 @@ else
 fi
 BOOTEOF
   chmod +x "$PORTS_SH"
-  "$PORTS_SH" || true
 
   if command -v systemctl >/dev/null 2>&1; then
     cat > /etc/systemd/system/antnest-rinetd-ports.service <<'UNITEOF'
@@ -191,7 +214,7 @@ RemainAfterExit=yes
 WantedBy=multi-user.target
 UNITEOF
     systemctl daemon-reload 2>/dev/null || true
-    systemctl enable --now antnest-rinetd-ports.service 2>/dev/null || true
+    systemctl enable antnest-rinetd-ports.service 2>/dev/null || true
   fi
 }
 
@@ -225,6 +248,16 @@ fi
 STATE="/etc/antnest-rinetd-state.conf"
 CONF="/etc/rinetd.conf"
 
+default_target() {
+  if [[ -f /etc/openvpn/server/antnest-udp.conf ]]; then
+    echo "10.8.0.2"
+  elif [[ -f /etc/openvpn/server/antnest-tcp.conf ]]; then
+    echo "10.9.0.2"
+  else
+    echo "10.8.0.2"
+  fi
+}
+
 rinetd_ok() {
   local target="$1" port
   pgrep -x rinetd >/dev/null 2>&1 || return 1
@@ -240,6 +273,7 @@ pick_target() {
   for status_file in /var/log/openvpn-antnest-udp-status.log /var/log/openvpn-antnest-tcp-status.log; do
     [[ -f "$status_file" ]] || continue
     # status-version 3: TAB 分隔, 字段1=CLIENT_LIST, 字段2=证书名, 字段4=虚拟地址
+    # （详见 antnest-rinetd-setup.sh 里同名函数的注释: 原来用 -F, + $2 永远匹配不上）
     candidate="$(awk -F'\t' -v cn="$node_client" \
       '$1=="CLIENT_LIST" && $2==cn && $4 ~ /^10\.(8|9)\.0\.[0-9]+$/ {print $4; exit}' \
       "$status_file" 2>/dev/null || true)"
@@ -256,7 +290,7 @@ pick_target() {
       return 0
     fi
   done
-  echo "10.8.0.2"
+  default_target
 }
 
 node_client="$(sed -n 's/^client=//p' "$STATE" 2>/dev/null | head -n1)"
@@ -293,10 +327,17 @@ logger -t antnest-node-fwd "rinetd target -> $target (client: $node_client)" 2>/
 EOF
   chmod +x "$REFRESH_SH"
 
-  cat > /etc/systemd/system/antnest-rinetd-watch.service <<'EOF'
+  after_units="network-online.target"
+  for _inst in antnest-udp antnest-tcp; do
+    if [[ -f "/etc/openvpn/server/$_inst.conf" ]]; then
+      after_units="$after_units openvpn-server@$_inst.service"
+    fi
+  done
+
+  cat > /etc/systemd/system/antnest-rinetd-watch.service <<EOF
 [Unit]
 Description=AntNest node rinetd target auto refresh
-After=network-online.target openvpn-server@antnest-udp.service openvpn-server@antnest-tcp.service
+After=$after_units
 
 [Service]
 Type=simple
@@ -337,13 +378,22 @@ ports=31400-31409/tcp
 updated_at=$(date -Is)
 EOF
 
-  if rinetd_ok "$target"; then
-    log "端口转发就绪: 31400-31409/tcp (rinetd) -> $target"
-    log "注意: rinetd 不转发 UDP"
-  else
-    log "转发校验未通过，请检查 rinetd 状态"
-    exit 1
+  if [[ -f "$PORTS_SH" ]]; then
+    "$PORTS_SH" || true
   fi
+
+  _tries=0
+  until rinetd_ok "$target"; do
+    _tries=$((_tries + 1))
+    if (( _tries >= 5 )); then
+      log "转发校验未通过，请检查 rinetd 状态"
+      exit 1
+    fi
+    sleep 2
+  done
+
+  log "端口转发就绪: 31400-31409/tcp (rinetd) -> $target"
+  log "注意: rinetd 不转发 UDP"
   log "跟随设备(证书名): $NODE_CLIENT"
 }
 

@@ -166,17 +166,20 @@ ensure_pki() {
   fi
 
   cd "$EASYRSA_DIR"
-  if [[ ! -d "$PKI_DIR" ]]; then
+  if [[ -f "$PKI_DIR/ca.crt" && -f "$PKI_DIR/issued/server.crt" \
+     && -f "$PKI_DIR/private/server.key" && -f "$PKI_DIR/tc.key" \
+     && -f "$PKI_DIR/crl.pem" ]]; then
+    if [[ ! -f "$PKI_DIR/issued/$CLIENT_NAME.crt" || ! -f "$PKI_DIR/private/$CLIENT_NAME.key" ]]; then
+      EASYRSA_CERT_EXPIRE=3650 ./easyrsa --batch build-client-full "$CLIENT_NAME" nopass
+    fi
+    EASYRSA_CRL_DAYS=3650 ./easyrsa --batch gen-crl
+  else
+    rm -rf "$PKI_DIR"
     ./easyrsa --batch init-pki
     EASYRSA_REQ_CN="antnest-ca" ./easyrsa --batch build-ca nopass
     openvpn --genkey secret "$PKI_DIR/tc.key"
     EASYRSA_CERT_EXPIRE=3650 ./easyrsa --batch build-server-full server nopass
     EASYRSA_CERT_EXPIRE=3650 ./easyrsa --batch build-client-full "$CLIENT_NAME" nopass
-    EASYRSA_CRL_DAYS=3650 ./easyrsa --batch gen-crl
-  else
-    if [[ ! -f "$PKI_DIR/issued/$CLIENT_NAME.crt" || ! -f "$PKI_DIR/private/$CLIENT_NAME.key" ]]; then
-      EASYRSA_CERT_EXPIRE=3650 ./easyrsa --batch build-client-full "$CLIENT_NAME" nopass
-    fi
     EASYRSA_CRL_DAYS=3650 ./easyrsa --batch gen-crl
   fi
 
@@ -235,7 +238,7 @@ persist-key
 persist-tun
 user nobody
 group nogroup
-status /var/log/openvpn-$name-status.log
+status /var/log/openvpn-$name-status.log 5
 status-version 3
 verb 3
 crl-verify crl.pem
@@ -264,26 +267,26 @@ EOF
 }
 
 configure_vpn_nat() {
-  cat > /etc/openvpn/server/antnest-vpn-nat.sh <<'EOF'
+  cat > /etc/openvpn/server/antnest-vpn-nat.sh <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
 
-wan_iface="$(ip -4 route show default 2>/dev/null | awk '{print $5; exit}')"
-if [[ -z "$wan_iface" ]]; then
+wan_iface="\$(ip -4 route show default 2>/dev/null | awk '{print \$5; exit}')"
+if [[ -z "\$wan_iface" ]]; then
   echo "missing default network interface" >&2
   exit 1
 fi
 
 sysctl -w net.ipv4.ip_forward=1 >/dev/null
-iptables -C INPUT -p udp --dport 62230 -j ACCEPT 2>/dev/null || iptables -I INPUT -p udp --dport 62230 -j ACCEPT
-iptables -C INPUT -p tcp --dport 62231 -j ACCEPT 2>/dev/null || iptables -I INPUT -p tcp --dport 62231 -j ACCEPT
-for net in 10.8.0.0/24 10.9.0.0/24; do
-  iptables -t nat -C POSTROUTING -s "$net" -o "$wan_iface" -j MASQUERADE 2>/dev/null || \
-    iptables -t nat -A POSTROUTING -s "$net" -o "$wan_iface" -j MASQUERADE
-  iptables -C FORWARD -s "$net" -j ACCEPT 2>/dev/null || \
-    iptables -A FORWARD -s "$net" -j ACCEPT
-  iptables -C FORWARD -d "$net" -j ACCEPT 2>/dev/null || \
-    iptables -A FORWARD -d "$net" -j ACCEPT
+iptables -C INPUT -p udp --dport $UDP_PORT -j ACCEPT 2>/dev/null || iptables -I INPUT -p udp --dport $UDP_PORT -j ACCEPT
+iptables -C INPUT -p tcp --dport $TCP_PORT -j ACCEPT 2>/dev/null || iptables -I INPUT -p tcp --dport $TCP_PORT -j ACCEPT
+for net in $VPN_NET_UDP/24 $VPN_NET_TCP/24; do
+  iptables -t nat -C POSTROUTING -s "\$net" -o "\$wan_iface" -j MASQUERADE 2>/dev/null || \\
+    iptables -t nat -A POSTROUTING -s "\$net" -o "\$wan_iface" -j MASQUERADE
+  iptables -C FORWARD -s "\$net" -j ACCEPT 2>/dev/null || \\
+    iptables -A FORWARD -s "\$net" -j ACCEPT
+  iptables -C FORWARD -d "\$net" -j ACCEPT 2>/dev/null || \\
+    iptables -A FORWARD -d "\$net" -j ACCEPT
 done
 EOF
   chmod +x /etc/openvpn/server/antnest-vpn-nat.sh
@@ -318,9 +321,11 @@ for s in antnest-udp antnest-tcp; do
   if [[ "$state" != "active" ]]; then
     continue
   fi
-  rows="$(sed -n '/^CLIENT LIST/,/^ROUTING TABLE/p' "$log" 2>/dev/null | grep -vE '^(CLIENT LIST|ROUTING TABLE|Updated)' | grep -v '^$' || true)"
+  rows="$(awk -F'\t' '$1=="CLIENT_LIST" {printf "  %-16s %-22s %s\n", $2, $3, $4}' \
+          "$log" 2>/dev/null || true)"
   echo "== $s (running) =="
   if [[ -n "$rows" ]]; then
+    echo "  CN               REAL ADDRESS           VIRTUAL"
     echo "$rows"
   else
     echo "  no clients connected"
@@ -419,6 +424,20 @@ main() {
   enable_forwarding
   configure_vpn_nat
   install_status_helper
+
+  case "$MODE" in
+    udp)  stale_instances="antnest-tcp" ;;
+    tcp)  stale_instances="antnest-udp" ;;
+    *)    stale_instances="" ;;
+  esac
+  for stale in $stale_instances; do
+    sed -i '/^client-connect /d' "/etc/openvpn/server/$stale.conf" 2>/dev/null || true
+    if command -v systemctl >/dev/null 2>&1; then
+      systemctl disable --now "openvpn-server@$stale.service" 2>/dev/null || true
+    fi
+    rm -f "/etc/openvpn/server/$stale.conf"
+    log "已清理本模式不需要的实例: $stale"
+  done
 
   server_ip="$(public_ip)"
   if [[ -z "$server_ip" ]]; then

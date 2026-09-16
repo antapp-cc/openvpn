@@ -12,17 +12,15 @@ PORTS_SH="/etc/openvpn/server/antnest-rinetd-ports.sh"
 STATE_CONF="/etc/antnest-rinetd-state.conf"
 RINETD_CONF="/etc/rinetd.conf"
 
-# ---------- 客户端还没连上时先转发到哪 ----------
-
 default_target() {
   local udp_conf="/etc/openvpn/server/antnest-udp.conf"
   local tcp_conf="/etc/openvpn/server/antnest-tcp.conf"
   if [[ -f "$udp_conf" ]]; then
-    echo "10.8.0.2"        # 有 UDP 实例（dual 模式）→ UDP 池优先，和客户端主用通道一致
+    echo "10.8.0.2"
   elif [[ -f "$tcp_conf" ]]; then
-    echo "10.9.0.2"        # 只有 TCP 实例 → 只能用 TCP 池
+    echo "10.9.0.2"
   else
-    echo "10.8.0.2"        # 两个都没有（OpenVPN 还没装）→ 维持老行为
+    echo "10.8.0.2"
   fi
 }
 
@@ -49,7 +47,6 @@ log() {
 }
 
 install_deps() {
-  # LTS 套件的 Release 文件会周期性过期, 关闭有效期检查(GPG 签名校验仍生效)
   echo 'Acquire::Check-Valid-Until "false";' > /etc/apt/apt.conf.d/99-antnest-apt.conf 2>/dev/null || true
   if ! command -v rinetd >/dev/null 2>&1; then
     log "安装 rinetd"
@@ -98,12 +95,14 @@ remove_old_dnat() {
   return 0
 }
 
-# ---------- 目标选择: 按证书名在 OpenVPN 状态日志里查虚拟 IP ----------
 pick_target() {
-  local status_file candidate
-  for status_file in /var/log/openvpn-antnest-udp-status.log /var/log/openvpn-antnest-tcp-status.log; do
+  local status_file candidate inst
+  for inst in antnest-udp antnest-tcp; do
+    status_file="/var/log/openvpn-$inst-status.log"
     [[ -f "$status_file" ]] || continue
-    # 主解析: status-version 3（TAB 分隔, 字段1=CLIENT_LIST, 字段2=证书名, 字段4=虚拟地址）
+    if command -v systemctl >/dev/null 2>&1; then
+      [[ "$(systemctl is-active "openvpn-server@$inst.service" 2>/dev/null)" == "active" ]] || continue
+    fi
     candidate="$(awk -F'\t' -v cn="$NODE_CLIENT" \
       '$1=="CLIENT_LIST" && $2==cn && $4 ~ /^10\.(8|9)\.0\.[0-9]+$/ {print $4; exit}' \
       "$status_file" 2>/dev/null || true)"
@@ -111,7 +110,6 @@ pick_target() {
       echo "$candidate"
       return 0
     fi
-    # v1 的虚拟地址在 ROUTING TABLE 段，且可能带 C(cached) 标志，所以先剥掉尾字母。
     candidate="$(awk -F, -v cn="$NODE_CLIENT" \
       '$2==cn && $1 ~ /^10\.(8|9)\.0\.[0-9]+[A-Z]?$/ {sub(/[A-Z]+$/,"",$1); print $1; exit}' \
       "$status_file" 2>/dev/null || true)"
@@ -123,7 +121,6 @@ pick_target() {
   default_target
 }
 
-# ---------- rinetd 管理 ----------
 write_rinetd_conf() {
   local target="$1" tmp port
   tmp="/tmp/rinetd.conf.$$"
@@ -156,7 +153,6 @@ rinetd_ok() {
   return 0
 }
 
-# ---------- 开机恢复 ----------
 write_ports_boot() {
   mkdir -p /etc/openvpn/server
   cat > "$PORTS_SH" <<'BOOTEOF'
@@ -218,7 +214,6 @@ UNITEOF
   fi
 }
 
-# ---------- watch: 每 5 秒跟随目标 ----------
 install_watch() {
   mkdir -p /etc/openvpn/server
   if command -v systemctl >/dev/null 2>&1; then
@@ -235,7 +230,6 @@ install_watch() {
 
   cat > "$REFRESH_SH" <<'EOF'
 #!/usr/bin/env bash
-# 每 5 秒: 目标变化 / rinetd 掉线 / 配置过期 -> 自动重建
 set -u
 if [[ "$(id -u)" -ne 0 ]]; then
   exit 0
@@ -269,11 +263,13 @@ rinetd_ok() {
 }
 
 pick_target() {
-  local status_file candidate
-  for status_file in /var/log/openvpn-antnest-udp-status.log /var/log/openvpn-antnest-tcp-status.log; do
+  local status_file candidate inst
+  for inst in antnest-udp antnest-tcp; do
+    status_file="/var/log/openvpn-$inst-status.log"
     [[ -f "$status_file" ]] || continue
-    # status-version 3: TAB 分隔, 字段1=CLIENT_LIST, 字段2=证书名, 字段4=虚拟地址
-    # （详见 antnest-rinetd-setup.sh 里同名函数的注释: 原来用 -F, + $2 永远匹配不上）
+    if command -v systemctl >/dev/null 2>&1; then
+      [[ "$(systemctl is-active "openvpn-server@$inst.service" 2>/dev/null)" == "active" ]] || continue
+    fi
     candidate="$(awk -F'\t' -v cn="$node_client" \
       '$1=="CLIENT_LIST" && $2==cn && $4 ~ /^10\.(8|9)\.0\.[0-9]+$/ {print $4; exit}' \
       "$status_file" 2>/dev/null || true)"
@@ -281,7 +277,6 @@ pick_target() {
       echo "$candidate"
       return 0
     fi
-    # 兜底: status-version 被改回 1/2 的情况（逗号分隔 + ROUTING TABLE 段）
     candidate="$(awk -F, -v cn="$node_client" \
       '$2==cn && $1 ~ /^10\.(8|9)\.0\.[0-9]+[A-Z]?$/ {sub(/[A-Z]+$/,"",$1); print $1; exit}' \
       "$status_file" 2>/dev/null || true)"
@@ -334,6 +329,11 @@ EOF
     fi
   done
 
+  REFRESH_LOOP="LOG=/var/log/antnest-rinetd-refresh.log; "
+  REFRESH_LOOP+="if [ -f \"\$LOG\" ] && [ \"\$(stat -c%s \"\$LOG\" 2>/dev/null || echo 0)\" -gt 1048576 ]; then mv -f \"\$LOG\" \"\$LOG.1\"; fi; "
+  REFRESH_LOOP+="/etc/openvpn/server/antnest-rinetd-refresh.sh >>\"\$LOG\" 2>&1 || true; "
+  REFRESH_LOOP+='sleep 5;'
+
   cat > /etc/systemd/system/antnest-rinetd-watch.service <<EOF
 [Unit]
 Description=AntNest node rinetd target auto refresh
@@ -341,7 +341,7 @@ After=$after_units
 
 [Service]
 Type=simple
-ExecStart=/bin/bash -c 'while true; do /etc/openvpn/server/antnest-rinetd-refresh.sh >/var/log/antnest-rinetd-refresh.log 2>&1 || true; sleep 5; done'
+ExecStart=/bin/bash -c 'while true; do $REFRESH_LOOP done'
 Restart=always
 RestartSec=3
 
@@ -351,10 +351,10 @@ EOF
 
   if command -v systemctl >/dev/null 2>&1; then
     systemctl daemon-reload 2>/dev/null || true
-    systemctl enable --now antnest-rinetd-watch.service 2>/dev/null || true
+    systemctl enable antnest-rinetd-watch.service 2>/dev/null || true
   else
     pkill -f 'antnest-rinetd-refresh.sh.*sleep 5' 2>/dev/null || true
-    nohup bash -c 'while true; do /etc/openvpn/server/antnest-rinetd-refresh.sh >/var/log/antnest-rinetd-refresh.log 2>&1 || true; sleep 5; done' >/dev/null 2>&1 &
+    nohup bash -c "while true; do $REFRESH_LOOP done" >/dev/null 2>&1 &
   fi
 }
 

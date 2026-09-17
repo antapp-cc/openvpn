@@ -382,6 +382,10 @@ EOF
     "$PORTS_SH" || true
   fi
 
+  if command -v systemctl >/dev/null 2>&1; then
+    systemctl restart antnest-rinetd-watch.service 2>/dev/null || true
+  fi
+
   _tries=0
   until rinetd_ok "$target"; do
     _tries=$((_tries + 1))

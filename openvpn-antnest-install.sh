@@ -197,6 +197,7 @@ ensure_pki() {
   cp "$PKI_DIR/crl.pem" /etc/openvpn/server/crl.pem
   cp "$PKI_DIR/tc.key" /etc/openvpn/server/tc.key
   chmod 644 /etc/openvpn/server/crl.pem
+  chmod o+x /etc/openvpn/server
 }
 
 write_server_conf() {
@@ -224,7 +225,7 @@ dh dh.pem
 topology subnet
 server $network $mask
 ifconfig-pool-persist ipp-$name.txt
-keepalive 5 30
+keepalive 10 120
 reneg-sec 0
 sndbuf 0
 rcvbuf 0
@@ -244,8 +245,8 @@ verb 3
 crl-verify crl.pem
 script-security 2
 push "redirect-gateway def1 bypass-dhcp"
-push "dhcp-option DNS 1.1.1.1"
 push "dhcp-option DNS 8.8.8.8"
+push "dhcp-option DNS 149.112.112.112"
 $notify
 $tcpopts
 EOF
@@ -278,15 +279,15 @@ if [[ -z "\$wan_iface" ]]; then
 fi
 
 sysctl -w net.ipv4.ip_forward=1 >/dev/null
-iptables -C INPUT -p udp --dport $UDP_PORT -j ACCEPT 2>/dev/null || iptables -I INPUT -p udp --dport $UDP_PORT -j ACCEPT
-iptables -C INPUT -p tcp --dport $TCP_PORT -j ACCEPT 2>/dev/null || iptables -I INPUT -p tcp --dport $TCP_PORT -j ACCEPT
+iptables -w 5 -C INPUT -p udp --dport $UDP_PORT -j ACCEPT 2>/dev/null || iptables -w 5 -I INPUT -p udp --dport $UDP_PORT -j ACCEPT
+iptables -w 5 -C INPUT -p tcp --dport $TCP_PORT -j ACCEPT 2>/dev/null || iptables -w 5 -I INPUT -p tcp --dport $TCP_PORT -j ACCEPT
 for net in $VPN_NET_UDP/24 $VPN_NET_TCP/24; do
-  iptables -t nat -C POSTROUTING -s "\$net" -o "\$wan_iface" -j MASQUERADE 2>/dev/null || \\
-    iptables -t nat -A POSTROUTING -s "\$net" -o "\$wan_iface" -j MASQUERADE
-  iptables -C FORWARD -s "\$net" -j ACCEPT 2>/dev/null || \\
-    iptables -A FORWARD -s "\$net" -j ACCEPT
-  iptables -C FORWARD -d "\$net" -j ACCEPT 2>/dev/null || \\
-    iptables -A FORWARD -d "\$net" -j ACCEPT
+  iptables -w 5 -t nat -C POSTROUTING -s "\$net" -o "\$wan_iface" -j MASQUERADE 2>/dev/null || \\
+    iptables -w 5 -t nat -A POSTROUTING -s "\$net" -o "\$wan_iface" -j MASQUERADE
+  iptables -w 5 -C FORWARD -s "\$net" -j ACCEPT 2>/dev/null || \\
+    iptables -w 5 -A FORWARD -s "\$net" -j ACCEPT
+  iptables -w 5 -C FORWARD -d "\$net" -j ACCEPT 2>/dev/null || \\
+    iptables -w 5 -A FORWARD -d "\$net" -j ACCEPT
 done
 EOF
   chmod +x /etc/openvpn/server/antnest-vpn-nat.sh
@@ -337,6 +338,10 @@ EOF
 
 start_instance() {
   local name="$1"
+  mkdir -p "/etc/systemd/system/openvpn-server@$name.service.d"
+  printf '[Service]\nLimitNPROC=infinity\n' \
+    > "/etc/systemd/system/openvpn-server@$name.service.d/disable-limitnproc.conf"
+  systemctl daemon-reload 2>/dev/null || true
   systemctl enable "openvpn-server@$name.service"
   systemctl restart "openvpn-server@$name.service"
 }
@@ -348,25 +353,26 @@ write_client_config() {
 
   cat > "$OUT_PATH" <<EOF
 client
+disable-dco
 dev tun
 resolv-retry infinite
 nobind
+persist-key
 persist-tun
 remote-cert-tls server
 auth SHA512
 cipher AES-256-GCM
 verb 3
-connect-retry 3 10
+connect-retry 5
 connect-timeout 8
 server-poll-timeout 10
 reneg-sec 0
 sndbuf 0
 rcvbuf 0
 socket-flags TCP_NODELAY
-ignore-unknown-option block-outside-dns register-dns block-ipv6
+ignore-unknown-option block-outside-dns register-dns
 block-outside-dns
 register-dns
-block-ipv6
 mssfix 1360
 tun-mtu 1500
 auth-nocache

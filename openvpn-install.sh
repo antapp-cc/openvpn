@@ -49,8 +49,8 @@ if [[ "$os" == "debian" ]]; then
 		echo "Debian Testing and Debian Unstable are unsupported by this installer."
 		exit
 	fi
-	if [[ "$os_version" -lt 11 ]]; then
-		echo "Debian 11 or higher is required to use this installer.
+	if [[ "$os_version" -lt 12 ]]; then
+		echo "Debian 12 or higher is required to use this installer.
 This version of Debian is too old and unsupported."
 		exit
 	fi
@@ -140,6 +140,45 @@ if [[ -n "$auto_mode" ]]; then
 fi
 
 if [[ ! -e /etc/openvpn/server/server.conf ]]; then
+	# Switch APT to official mirrors (automatic mode only)
+	if [[ -n "$auto_mode" ]] && [[ "$os" = "debian" || "$os" = "ubuntu" ]]; then
+		codename=$(grep -m1 '^VERSION_CODENAME=' /etc/os-release | cut -d= -f2 | tr -d '"')
+		if [[ -n "$codename" ]]; then
+			if [[ -e /etc/apt/sources.list.d/debian.sources ]]; then
+				cp -a /etc/apt/sources.list.d/debian.sources /etc/apt/sources.list.d/debian.sources.bak 2>/dev/null
+				cat > /etc/apt/sources.list.d/debian.sources <<EOF
+Types: deb
+URIs: http://deb.debian.org/debian
+Suites: $codename $codename-updates
+Components: main contrib non-free non-free-firmware
+Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg
+
+Types: deb
+URIs: http://security.debian.org/debian-security
+Suites: $codename-security
+Components: main contrib non-free non-free-firmware
+Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg
+EOF
+				: > /etc/apt/sources.list
+			elif [[ "$os" = "debian" ]]; then
+				cp -a /etc/apt/sources.list /etc/apt/sources.list.bak 2>/dev/null
+				cat > /etc/apt/sources.list <<EOF
+deb http://deb.debian.org/debian $codename main contrib non-free non-free-firmware
+deb http://deb.debian.org/debian $codename-updates main contrib non-free non-free-firmware
+deb http://security.debian.org/debian-security $codename-security main contrib non-free non-free-firmware
+EOF
+			else
+				cp -a /etc/apt/sources.list /etc/apt/sources.list.bak 2>/dev/null
+				cat > /etc/apt/sources.list <<EOF
+deb http://archive.ubuntu.com/ubuntu $codename main restricted universe multiverse
+deb http://archive.ubuntu.com/ubuntu $codename-updates main restricted universe multiverse
+deb http://archive.ubuntu.com/ubuntu $codename-backports main restricted universe multiverse
+deb http://security.ubuntu.com/ubuntu $codename-security main restricted universe multiverse
+EOF
+			fi
+			echo "APT sources switched to official mirrors ($codename)."
+		fi
+	fi
 	# Detect some Debian minimal setups where neither wget nor curl are installed
 	if ! hash wget 2>/dev/null && ! hash curl 2>/dev/null; then
 		echo "Wget is required to use this installer."

@@ -530,6 +530,50 @@ verb 3" > /etc/openvpn/server/client-common.txt
 	echo
 	echo "The client configuration is available in:" "$script_dir"/"$client.ovpn"
 	echo "New clients can be added by running this script again."
+	# Enable BBR congestion control
+	if sysctl -n net.ipv4.tcp_available_congestion_control 2>/dev/null | grep -qw bbr; then
+		cat > /etc/sysctl.d/99-bbr.conf <<'BBR'
+net.core.default_qdisc = fq
+net.ipv4.tcp_congestion_control = bbr
+net.ipv4.tcp_fastopen = 3
+net.ipv4.tcp_slow_start_after_idle = 0
+net.ipv4.tcp_tw_reuse = 1
+net.ipv4.tcp_mtu_probing = 1
+net.core.somaxconn = 32768
+net.ipv4.tcp_max_syn_backlog = 8192
+net.core.rmem_max = 67108864
+net.core.wmem_max = 67108864
+net.ipv4.tcp_rmem = 4096 87380 67108864
+net.ipv4.tcp_wmem = 4096 65536 67108864
+BBR
+		sysctl -p /etc/sysctl.d/99-bbr.conf >/dev/null 2>&1 || true
+		echo "BBR enabled: $(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null)"
+	else
+		echo "Warning: this kernel does not support BBR, skipped."
+	fi
+	# Pi-Node port forwarding (automatic mode only)
+	if [[ -n "$auto_mode" ]]; then
+		case "$os" in
+			debian|ubuntu)
+				hash rinetd 2>/dev/null || apt-get install -y rinetd
+				cat > /etc/rinetd.conf <<'RINETD'
+# Pi-Node节点端口转发
+0.0.0.0 31400 10.8.0.2 31400
+0.0.0.0 31401 10.8.0.2 31401
+0.0.0.0 31402 10.8.0.2 31402
+0.0.0.0 31403 10.8.0.2 31403
+0.0.0.0 31404 10.8.0.2 31404
+0.0.0.0 31405 10.8.0.2 31405
+0.0.0.0 31406 10.8.0.2 31406
+0.0.0.0 31407 10.8.0.2 31407
+0.0.0.0 31408 10.8.0.2 31408
+0.0.0.0 31409 10.8.0.2 31409
+RINETD
+				systemctl enable rinetd >/dev/null 2>&1
+				systemctl restart rinetd >/dev/null 2>&1 && echo "Port forwarding enabled: 31400-31409 -> 10.8.0.2" || echo "Warning: rinetd failed to start, check: journalctl -u rinetd"
+			;;
+		esac
+	fi
 else
 	if [[ -n "$auto_mode" ]]; then
 		echo "OpenVPN is already installed (/etc/openvpn/server/server.conf exists). Automatic mode only performs a fresh install; run the script without arguments to manage clients." >&2
